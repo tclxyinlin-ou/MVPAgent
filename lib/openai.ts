@@ -4,8 +4,8 @@ import { copyFile, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { promisify } from "util";
 import {
+  MARKDOWN_DIR,
   readState,
-  TEXT_DIR,
   type IndexedDocument,
   UPLOAD_DIR,
   writeState,
@@ -35,6 +35,11 @@ function sanitizeFilename(filename: string) {
   return filename.replace(/[^a-zA-Z0-9._-\u4e00-\u9fa5]/g, "_");
 }
 
+function getMarkdownFilename(filename: string) {
+  const base = filename.replace(/\.[^.]+$/, "");
+  return `${sanitizeFilename(base)}.md`;
+}
+
 function normalizeText(text: string) {
   return text
     .replace(/\r\n/g, "\n")
@@ -43,7 +48,7 @@ function normalizeText(text: string) {
     .trim();
 }
 
-function chunkText(text: string, chunkSize = 900, overlap = 180) {
+export function chunkText(text: string, chunkSize = 900, overlap = 180) {
   const chunks: string[] = [];
   let start = 0;
 
@@ -88,6 +93,15 @@ async function extractTextFromDocument(filePath: string) {
   throw new Error(`暂不支持 ${extension || "该格式"} 文件。`);
 }
 
+function toMarkdownDocument(filename: string, text: string) {
+  return `# ${filename}\n\n${text}\n`;
+}
+
+export async function readMarkdownChunks(markdownPath: string) {
+  const markdown = normalizeText(await readFile(markdownPath, "utf8"));
+  return chunkText(markdown);
+}
+
 export async function indexDocumentLocally({
   filePath,
   filename,
@@ -101,7 +115,10 @@ export async function indexDocumentLocally({
   const timestamp = Date.now();
   const safeFilename = sanitizeFilename(filename);
   const storedPath = path.join(UPLOAD_DIR, `${timestamp}-${safeFilename}`);
-  const textPath = path.join(TEXT_DIR, `${timestamp}-${safeFilename}.json`);
+  const markdownPath = path.join(
+    MARKDOWN_DIR,
+    `${timestamp}-${getMarkdownFilename(filename)}`,
+  );
 
   await copyFile(filePath, storedPath);
 
@@ -110,21 +127,9 @@ export async function indexDocumentLocally({
     throw new Error("文档内容为空，无法建立索引。");
   }
 
-  const chunks = chunkText(extractedText);
-
-  await writeFile(
-    textPath,
-    JSON.stringify(
-      {
-        filename,
-        extractedAt: new Date().toISOString(),
-        chunks,
-      },
-      null,
-      2,
-    ),
-    "utf8",
-  );
+  const markdownContent = toMarkdownDocument(filename, extractedText);
+  await writeFile(markdownPath, markdownContent, "utf8");
+  const chunks = chunkText(normalizeText(markdownContent));
 
   const nextDocument: IndexedDocument = {
     id: `${timestamp}:${safeFilename}`,
@@ -133,7 +138,7 @@ export async function indexDocumentLocally({
     status: "indexed",
     source,
     storedPath,
-    textPath,
+    markdownPath,
     chunkCount: chunks.length,
   };
 
@@ -145,6 +150,7 @@ export async function indexDocumentLocally({
 
   return {
     documentId: nextDocument.id,
+    markdownPath: nextDocument.markdownPath,
     chunkCount: chunks.length,
   };
 }

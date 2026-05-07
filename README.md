@@ -7,14 +7,18 @@
 - 用户上传文档后，系统能不能基于文档内容答准
 - 回答时能不能带回命中的原文片段
 - 面对缺少证据的问题，能不能明确说不知道
+- 模型能不能先决定调用工具，再基于工具结果回答
 
 ## 当前能力
 
 - 上传 `pdf / doc / docx / txt / md`
 - 本地解析文档正文并切片
+- 自动导出本地可编辑 Markdown
 - 本地检索相关片段
-- 使用兼容 OpenAI `chat/completions` 的模型生成回答
+- 多文档 tab 切换，提问只针对当前文档
+- 使用兼容 OpenAI `chat/completions` 的模型驱动轻量 Agent 循环
 - 在页面展示答案和命中的文档片段
+- 展示 Agent 的工具调用步骤
 - 内置导入当前目录示例文档按钮
 
 ## 本地启动
@@ -64,6 +68,8 @@ http://localhost:3000
 
 `/Users/yinlin/Desktop/AI/MVPAI/国际站多渠道环境.docx`
 
+导入后系统会在 `.mvp-docs/markdown/` 下生成对应的 `.md` 文件，后续你可以直接修改这份 Markdown，问答会优先读取修改后的内容。
+
 ## 目录说明
 
 - `app/page.tsx`: 首页 UI
@@ -71,11 +77,12 @@ http://localhost:3000
 - `app/api/ask/route.ts`: 本地检索 + 模型回答
 - `app/api/status/route.ts`: 查询知识库状态
 - `lib/openai.ts`: OpenAI 兼容模型接入和本地解析逻辑
+- `.mvp-docs/markdown/`: 导出的可编辑 Markdown 文档
 - `lib/store.ts`: 本地状态存储
 
 ## 已知限制
 
-- 现在是单知识库模式
+- 当前没有做文档分组、文件夹层级或权限隔离
 - 没有用户体系和权限控制
 - 没有对敏感字段做自动脱敏
 - 没有多轮会话记忆
