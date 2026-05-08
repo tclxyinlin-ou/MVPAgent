@@ -1,6 +1,11 @@
 "use client";
 
+import dynamic from "next/dynamic";
 import { useEffect, useRef, useState, useTransition } from "react";
+
+const RichDocumentEditor = dynamic(() => import("./components/RichDocumentEditor"), {
+  ssr: false,
+});
 
 type IndexedDocument = {
   id: string;
@@ -66,10 +71,16 @@ const ASK_TIMEOUT_MS = 45000;
 export default function HomePage() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
+  const [pendingDeleteDocumentId, setPendingDeleteDocumentId] = useState<string | null>(null);
   const [question, setQuestion] = useState(SAMPLE_QUESTIONS[0]);
   const [answer, setAnswer] = useState("");
   const [steps, setSteps] = useState<AskResponse["steps"]>([]);
   const [sources, setSources] = useState<AskResponse["sources"]>([]);
+  const [markdownContent, setMarkdownContent] = useState("");
+  const [richTextContent, setRichTextContent] = useState("");
+  const [savedRichTextContent, setSavedRichTextContent] = useState("");
+  const [isEditorLoading, setIsEditorLoading] = useState(false);
+  const [isSavingMarkdown, setIsSavingMarkdown] = useState(false);
   const [notice, setNotice] = useState("先导入文档，再开始问答。");
   const [isStreaming, setIsStreaming] = useState(false);
   const [toast, setToast] = useState<{
@@ -105,6 +116,60 @@ export default function HomePage() {
   useEffect(() => {
     void loadStatus();
   }, []);
+
+  useEffect(() => {
+    if (!activeDocumentId) {
+      setMarkdownContent("");
+      setRichTextContent("");
+      setSavedRichTextContent("");
+      return;
+    }
+
+    const documentId = activeDocumentId;
+
+    let cancelled = false;
+
+    async function loadDocumentMarkdown() {
+      setIsEditorLoading(true);
+
+      try {
+        const res = await fetch(`/api/documents/${encodeURIComponent(documentId)}`);
+        const data = (await res.json()) as {
+          ok: boolean;
+          error?: string;
+          document?: {
+            content: string;
+            htmlContent: string;
+          };
+        };
+
+        if (!res.ok || !data.ok || !data.document) {
+          throw new Error(data.error || "读取 Markdown 失败。");
+        }
+
+        if (!cancelled) {
+          setMarkdownContent(data.document.content);
+          setRichTextContent(data.document.htmlContent || "<p></p>");
+          setSavedRichTextContent(data.document.htmlContent || "<p></p>");
+        }
+      } catch (error) {
+        if (!cancelled) {
+          const message = error instanceof Error ? error.message : "读取 Markdown 失败。";
+          showToast("error", message);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsEditorLoading(false);
+        }
+      }
+    }
+
+    void loadDocumentMarkdown();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeDocumentId]);
 
   async function importSampleDocument() {
     if (isPending) {
@@ -175,6 +240,109 @@ export default function HomePage() {
     await loadStatus();
     if (data.documentId) {
       setActiveDocumentId(data.documentId);
+    }
+  }
+
+  async function saveMarkdown() {
+    if (!activeDocumentId || isSavingMarkdown) {
+      return;
+    }
+
+    const documentId = activeDocumentId;
+
+    setIsSavingMarkdown(true);
+
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(documentId)}`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          content: markdownContent,
+          htmlContent: richTextContent,
+        }),
+      });
+
+      const data = (await res.json()) as {
+        ok: boolean;
+        error?: string;
+        chunkCount?: number;
+      };
+
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "保存 Markdown 失败。");
+      }
+
+      setSavedRichTextContent(richTextContent);
+      setStatus((current) =>
+        current
+          ? {
+              ...current,
+              documents: current.documents.map((document) =>
+                document.id === documentId
+                  ? {
+                      ...document,
+                      chunkCount: data.chunkCount ?? document.chunkCount,
+                    }
+                  : document,
+              ),
+            }
+          : current,
+      );
+      setNotice("Markdown 已保存，后续问答会基于最新内容。");
+      showToast("success", "Markdown 保存成功。");
+      await loadStatus();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "保存 Markdown 失败。";
+      setNotice(message);
+      showToast("error", message);
+    } finally {
+      setIsSavingMarkdown(false);
+    }
+  }
+
+  async function deleteDocument(documentId: string) {
+    if (isPending || isSavingMarkdown || isStreaming) {
+      return;
+    }
+
+    const target = status?.documents.find((document) => document.id === documentId);
+    if (!target) {
+      showToast("error", "文档不存在。");
+      return;
+    }
+
+    try {
+      const res = await fetch(`/api/documents/${encodeURIComponent(documentId)}`, {
+        method: "DELETE",
+      });
+
+      const data = (await res.json()) as { ok: boolean; error?: string; deletedId?: string };
+
+      if (!res.ok || !data.ok) {
+        throw new Error(data.error || "删除文档失败。");
+      }
+
+      const remainingDocuments =
+        status?.documents.filter((document) => document.id !== documentId) || [];
+
+      setPendingDeleteDocumentId(null);
+      setStatus((current) =>
+        current
+          ? {
+              ...current,
+              documents: current.documents.filter((document) => document.id !== documentId),
+            }
+          : current,
+      );
+      setActiveDocumentId(remainingDocuments[0]?.id || null);
+      setNotice(`文档「${target.filename}」已删除。`);
+      showToast("success", "文档删除成功。");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除文档失败。";
+      setNotice(message);
+      showToast("error", message);
     }
   }
 
@@ -468,9 +636,19 @@ export default function HomePage() {
                     >
                       <div className="doc-item-top">
                         <strong>{document.filename}</strong>
-                        <span className="doc-badge">
-                          {document.source === "workspace" ? "示例文档" : "上传文档"}
-                        </span>
+                        <div className="doc-item-actions">
+                          <span className="doc-chip">
+                            {document.source === "workspace" ? "示例文档" : "上传文档"}
+                          </span>
+                          <button
+                            type="button"
+                            className="doc-chip doc-chip-danger"
+                            disabled={isPending || isSavingMarkdown || isStreaming}
+                            onClick={() => setPendingDeleteDocumentId(document.id)}
+                          >
+                            删除
+                          </button>
+                        </div>
                       </div>
                       <div className="doc-meta">
                         <span className="muted tiny">{document.chunkCount || 0} 个片段</span>
@@ -478,14 +656,6 @@ export default function HomePage() {
                           {new Date(document.uploadedAt).toLocaleString("zh-CN")}
                         </span>
                       </div>
-                      {document.markdownPath ? (
-                        <div className="doc-path">
-                          <span className="muted tiny">可编辑 Markdown：</span>
-                          <a href={document.markdownPath} className="tiny">
-                            {document.markdownPath}
-                          </a>
-                        </div>
-                      ) : null}
                     </div>
                   ))
                 ) : (
@@ -551,11 +721,19 @@ export default function HomePage() {
               <button
                 className="button"
                 onClick={() => askQuestion()}
-                disabled={isPending}
+                disabled={
+                  isPending || isSavingMarkdown || richTextContent !== savedRichTextContent
+                }
               >
                 {isPending ? "回答中..." : "开始提问"}
               </button>
             </div>
+
+            {richTextContent !== savedRichTextContent ? (
+              <div className="status">
+                当前 Markdown 有未保存修改。先保存，再提问，避免问答仍基于旧内容。
+              </div>
+            ) : null}
 
             <div className="chat-output">
               <div className="answer-shell">
@@ -587,6 +765,70 @@ export default function HomePage() {
                     </div>
                   ) : (
                     "答案会显示在这里。第一版重点是答复准确和带出处。"
+                  )}
+                </div>
+              </div>
+
+              <div className="panel md-editor-panel">
+                <div className="panel-inner">
+                  <div className="section-head">
+                    <div>
+                      <h3>Markdown 编辑器</h3>
+                      <p className="muted tiny">
+                        直接修改当前 tab 文档的 `.md`，保存后问答立即基于新内容。
+                      </p>
+                    </div>
+                    <div className="actions">
+                      <button
+                        className="ghost-button"
+                        type="button"
+                        onClick={() => setRichTextContent(savedRichTextContent)}
+                        disabled={
+                          isEditorLoading ||
+                          isSavingMarkdown ||
+                          richTextContent === savedRichTextContent
+                        }
+                      >
+                        撤销修改
+                      </button>
+                      <button
+                        className="button"
+                        type="button"
+                        onClick={() => void saveMarkdown()}
+                        disabled={
+                          !activeDocumentId ||
+                          isEditorLoading ||
+                          isSavingMarkdown ||
+                          richTextContent === savedRichTextContent
+                        }
+                      >
+                        {isSavingMarkdown ? "保存中..." : "保存 Markdown"}
+                      </button>
+                    </div>
+                  </div>
+
+                  {isEditorLoading ? (
+                    <div className="loading-state">
+                      <div className="loading-dots" aria-hidden="true">
+                        <span />
+                        <span />
+                        <span />
+                      </div>
+                      <div>
+                        <strong>正在加载文档</strong>
+                        <p className="muted tiny">读取当前文档对应的 Markdown 内容。</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="md-editor-wrap">
+                      <RichDocumentEditor
+                        value={richTextContent}
+                        disabled={isSavingMarkdown || isPending || isStreaming}
+                        onChange={({ html }) => {
+                          setRichTextContent(html);
+                        }}
+                      />
+                    </div>
                   )}
                 </div>
               </div>
@@ -661,6 +903,39 @@ export default function HomePage() {
         <div className={`toast toast-${toast.kind}`} role="status" aria-live="polite">
           <span className="toast-mark">{toast.kind === "error" ? "!" : "✓"}</span>
           <span>{toast.message}</span>
+        </div>
+      ) : null}
+
+      {pendingDeleteDocumentId ? (
+        <div className="confirm-overlay" role="dialog" aria-modal="true">
+          <div className="confirm-card">
+            <h3>确认删除文档</h3>
+            <p className="muted">
+              将删除当前文档、本地 Markdown 和富文本内容。这个操作不能恢复。
+            </p>
+            <div className="confirm-target">
+              {
+                status?.documents.find((document) => document.id === pendingDeleteDocumentId)
+                  ?.filename
+              }
+            </div>
+            <div className="confirm-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => setPendingDeleteDocumentId(null)}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                onClick={() => void deleteDocument(pendingDeleteDocumentId)}
+              >
+                二次确认删除
+              </button>
+            </div>
+          </div>
         </div>
       ) : null}
     </main>

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import "@toast-ui/editor/dist/toastui-editor.css";
 import "./globals.css";
 
 export const metadata: Metadata = {

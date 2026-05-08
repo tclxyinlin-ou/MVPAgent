@@ -6,10 +6,12 @@ import { promisify } from "util";
 import {
   MARKDOWN_DIR,
   readState,
+  RICH_TEXT_DIR,
   type IndexedDocument,
   UPLOAD_DIR,
   writeState,
 } from "@/lib/store";
+import { marked } from "marked";
 
 const execFileAsync = promisify(execFile);
 
@@ -40,7 +42,7 @@ function getMarkdownFilename(filename: string) {
   return `${sanitizeFilename(base)}.md`;
 }
 
-function normalizeText(text: string) {
+export function normalizeText(text: string) {
   return text
     .replace(/\r\n/g, "\n")
     .replace(/\u00a0/g, " ")
@@ -119,6 +121,10 @@ export async function indexDocumentLocally({
     MARKDOWN_DIR,
     `${timestamp}-${getMarkdownFilename(filename)}`,
   );
+  const richTextPath = path.join(
+    RICH_TEXT_DIR,
+    `${timestamp}-${sanitizeFilename(filename.replace(/\.[^.]+$/, ""))}.html`,
+  );
 
   await copyFile(filePath, storedPath);
 
@@ -129,6 +135,7 @@ export async function indexDocumentLocally({
 
   const markdownContent = toMarkdownDocument(filename, extractedText);
   await writeFile(markdownPath, markdownContent, "utf8");
+  await writeFile(richTextPath, await marked.parse(markdownContent), "utf8");
   const chunks = chunkText(normalizeText(markdownContent));
 
   const nextDocument: IndexedDocument = {
@@ -139,6 +146,7 @@ export async function indexDocumentLocally({
     source,
     storedPath,
     markdownPath,
+    richTextPath,
     chunkCount: chunks.length,
   };
 
@@ -151,6 +159,7 @@ export async function indexDocumentLocally({
   return {
     documentId: nextDocument.id,
     markdownPath: nextDocument.markdownPath,
+    richTextPath: nextDocument.richTextPath,
     chunkCount: chunks.length,
   };
 }

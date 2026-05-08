@@ -9,10 +9,28 @@
     "lint": "next lint"
   },
   "dependencies": {
+    "@tiptap/extension-color": "^3.22.5",
+    "@tiptap/extension-highlight": "^3.22.5",
+    "@tiptap/extension-link": "^3.22.5",
+    "@tiptap/extension-placeholder": "^3.22.5",
+    "@tiptap/extension-table": "^3.22.5",
+    "@tiptap/extension-table-cell": "^3.22.5",
+    "@tiptap/extension-table-header": "^3.22.5",
+    "@tiptap/extension-table-row": "^3.22.5",
+    "@tiptap/extension-text-align": "^3.22.5",
+    "@tiptap/extension-text-style": "^3.22.5",
+    "@tiptap/extension-underline": "^3.22.5",
+    "@tiptap/react": "^3.22.5",
+    "@tiptap/starter-kit": "^3.22.5",
+    "@toast-ui/react-editor": "^3.2.3",
+    "@uiw/react-md-editor": "^4.1.0",
+    "marked": "^18.0.3",
     "next": "15.3.2",
     "openai": "^4.104.0",
     "react": "19.0.0",
-    "react-dom": "19.0.0"
+    "react-dom": "19.0.0",
+    "remark-gfm": "^4.0.1",
+    "turndown": "^7.2.4"
   },
   "devDependencies": {
     "@types/node": "^22.15.17",
