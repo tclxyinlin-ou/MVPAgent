@@ -192,6 +192,22 @@ textarea {
   overflow: hidden;
 }
 
+.md-editor-collapsed {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 72px;
+  padding: 16px 18px;
+  border-radius: 18px;
+  background: rgba(151, 169, 198, 0.08);
+  border: 1px solid rgba(151, 169, 198, 0.1);
+}
+
+.collapse-button {
+  border-color: rgba(151, 169, 198, 0.18);
+}
+
 .md-editor-wrap {
   border-radius: 18px;
   overflow: hidden;

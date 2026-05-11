@@ -88,6 +88,7 @@ export default function HomePage() {
   const [richTextContent, setRichTextContent] = useState("");
   const [savedRichTextContent, setSavedRichTextContent] = useState("");
   const [isEditorDirty, setIsEditorDirty] = useState(false);
+  const [isEditorCollapsed, setIsEditorCollapsed] = useState(false);
   const [isEditorLoading, setIsEditorLoading] = useState(false);
   const [isSavingMarkdown, setIsSavingMarkdown] = useState(false);
   const [notice, setNotice] = useState("先导入文档，再开始问答。");
@@ -818,6 +819,14 @@ export default function HomePage() {
                     </div>
                     <div className="actions">
                       <button
+                        className="ghost-button collapse-button"
+                        type="button"
+                        onClick={() => setIsEditorCollapsed((current) => !current)}
+                        aria-expanded={!isEditorCollapsed}
+                      >
+                        {isEditorCollapsed ? "展开编辑器" : "折叠编辑器"}
+                      </button>
+                      <button
                         className="ghost-button"
                         type="button"
                         onClick={() => {
@@ -852,7 +861,16 @@ export default function HomePage() {
                     </div>
                   </div>
 
-                  {isEditorLoading ? (
+                  {isEditorCollapsed ? (
+                    <div className="md-editor-collapsed">
+                      <strong>{isEditorDirty ? "有未保存修改" : "编辑器已折叠"}</strong>
+                      <span className="muted tiny">
+                        {isEditorDirty
+                          ? "展开后可继续编辑，或直接保存当前修改。"
+                          : "点击展开编辑器继续查看和修改 Markdown。"}
+                      </span>
+                    </div>
+                  ) : isEditorLoading ? (
                     <div className="loading-state">
                       <div className="loading-dots" aria-hidden="true">
                         <span />
