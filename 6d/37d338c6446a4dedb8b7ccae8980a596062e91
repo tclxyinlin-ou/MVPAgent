@@ -1,0 +1,21 @@
+app/page.tsx
+  s_e28f3e4d0d5714::t_15a0c67ed9901c 91,821-828,864-873
+app/globals.css
+  s_e28f3e4d0d5714::t_3619f4da5f2ccf 195-210
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "6d37d338c6446a4dedb8b7ccae8980a596062e91",
+  "prompts": {},
+  "sessions": {
+    "s_e28f3e4d0d5714": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e0175-7427-71b1-90fb-04684bb6912c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "ouyinlin <suyu15008507430@163.com>"
+    }
+  }
+}
