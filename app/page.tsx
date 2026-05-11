@@ -68,6 +68,14 @@ const SAMPLE_QUESTIONS = [
 
 const ASK_TIMEOUT_MS = 45000;
 
+function normalizeRichTextForDirtyCheck(html: string) {
+  return html
+    .replace(/\sdata-outline-id="[^"]*"/g, "")
+    .replace(/\s+/g, " ")
+    .replace(/>\s+</g, "><")
+    .trim();
+}
+
 export default function HomePage() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
@@ -79,6 +87,7 @@ export default function HomePage() {
   const [markdownContent, setMarkdownContent] = useState("");
   const [richTextContent, setRichTextContent] = useState("");
   const [savedRichTextContent, setSavedRichTextContent] = useState("");
+  const [isEditorDirty, setIsEditorDirty] = useState(false);
   const [isEditorLoading, setIsEditorLoading] = useState(false);
   const [isSavingMarkdown, setIsSavingMarkdown] = useState(false);
   const [notice, setNotice] = useState("先导入文档，再开始问答。");
@@ -89,6 +98,9 @@ export default function HomePage() {
   } | null>(null);
   const [isPending, startTransition] = useTransition();
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const ignoreEditorChangeRef = useRef(false);
+  const acceptInitialEditorHtmlRef = useRef(false);
+  const savedRichTextContentRef = useRef("");
 
   function showToast(kind: "error" | "success", message: string) {
     if (toastTimerRef.current) {
@@ -122,6 +134,9 @@ export default function HomePage() {
       setMarkdownContent("");
       setRichTextContent("");
       setSavedRichTextContent("");
+      savedRichTextContentRef.current = "";
+      acceptInitialEditorHtmlRef.current = false;
+      setIsEditorDirty(false);
       return;
     }
 
@@ -148,9 +163,20 @@ export default function HomePage() {
         }
 
         if (!cancelled) {
+          ignoreEditorChangeRef.current = true;
+          acceptInitialEditorHtmlRef.current = true;
+          const nextHtml = data.document.htmlContent || "<p></p>";
           setMarkdownContent(data.document.content);
-          setRichTextContent(data.document.htmlContent || "<p></p>");
-          setSavedRichTextContent(data.document.htmlContent || "<p></p>");
+          setRichTextContent(nextHtml);
+          setSavedRichTextContent(nextHtml);
+          savedRichTextContentRef.current = nextHtml;
+          setIsEditorDirty(false);
+          window.setTimeout(() => {
+            ignoreEditorChangeRef.current = false;
+          }, 250);
+          window.setTimeout(() => {
+            acceptInitialEditorHtmlRef.current = false;
+          }, 1200);
         }
       } catch (error) {
         if (!cancelled) {
@@ -274,7 +300,13 @@ export default function HomePage() {
         throw new Error(data.error || "保存 Markdown 失败。");
       }
 
+      savedRichTextContentRef.current = richTextContent;
       setSavedRichTextContent(richTextContent);
+      ignoreEditorChangeRef.current = true;
+      setIsEditorDirty(false);
+      window.setTimeout(() => {
+        ignoreEditorChangeRef.current = false;
+      }, 0);
       setStatus((current) =>
         current
           ? {
@@ -361,6 +393,12 @@ export default function HomePage() {
     if (!activeDocumentId) {
       setNotice("先选择一份文档。");
       showToast("error", "当前没有选中文档。");
+      return;
+    }
+
+    if (isEditorDirty) {
+      setNotice("当前 Markdown 有未保存修改。先保存，再提问。");
+      showToast("error", "先保存 Markdown，再开始提问。");
       return;
     }
 
@@ -722,14 +760,14 @@ export default function HomePage() {
                 className="button"
                 onClick={() => askQuestion()}
                 disabled={
-                  isPending || isSavingMarkdown || richTextContent !== savedRichTextContent
+                  isPending || isSavingMarkdown || isEditorDirty
                 }
               >
                 {isPending ? "回答中..." : "开始提问"}
               </button>
             </div>
 
-            {richTextContent !== savedRichTextContent ? (
+            {isEditorDirty ? (
               <div className="status">
                 当前 Markdown 有未保存修改。先保存，再提问，避免问答仍基于旧内容。
               </div>
@@ -782,11 +820,18 @@ export default function HomePage() {
                       <button
                         className="ghost-button"
                         type="button"
-                        onClick={() => setRichTextContent(savedRichTextContent)}
+                        onClick={() => {
+                          ignoreEditorChangeRef.current = true;
+                          setRichTextContent(savedRichTextContent);
+                          setIsEditorDirty(false);
+                          window.setTimeout(() => {
+                            ignoreEditorChangeRef.current = false;
+                          }, 0);
+                        }}
                         disabled={
                           isEditorLoading ||
                           isSavingMarkdown ||
-                          richTextContent === savedRichTextContent
+                          !isEditorDirty
                         }
                       >
                         撤销修改
@@ -799,7 +844,7 @@ export default function HomePage() {
                           !activeDocumentId ||
                           isEditorLoading ||
                           isSavingMarkdown ||
-                          richTextContent === savedRichTextContent
+                          !isEditorDirty
                         }
                       >
                         {isSavingMarkdown ? "保存中..." : "保存 Markdown"}
@@ -826,6 +871,21 @@ export default function HomePage() {
                         disabled={isSavingMarkdown || isPending || isStreaming}
                         onChange={({ html }) => {
                           setRichTextContent(html);
+                          if (acceptInitialEditorHtmlRef.current) {
+                            acceptInitialEditorHtmlRef.current = false;
+                            savedRichTextContentRef.current = html;
+                            setSavedRichTextContent(html);
+                            setIsEditorDirty(false);
+                            return;
+                          }
+
+                          if (ignoreEditorChangeRef.current) {
+                            return;
+                          }
+                          setIsEditorDirty(
+                            normalizeRichTextForDirtyCheck(html) !==
+                              normalizeRichTextForDirtyCheck(savedRichTextContentRef.current),
+                          );
                         }}
                       />
                     </div>

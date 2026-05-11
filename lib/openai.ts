@@ -50,6 +50,97 @@ export function normalizeText(text: string) {
     .trim();
 }
 
+function decodeXmlText(text: string) {
+  return text
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/\u00a0/g, " ");
+}
+
+async function unzipDocxEntry(filePath: string, entry: string) {
+  const { stdout } = await execFileAsync("unzip", ["-p", filePath, entry]);
+  return stdout;
+}
+
+function parseDocxHeadingStyles(stylesXml: string) {
+  const headingStyles = new Map<string, number>();
+  const styleRegex = /<w:style\b[^>]*?w:styleId="([^"]+)"[^>]*>([\s\S]*?)<\/w:style>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = styleRegex.exec(stylesXml))) {
+    const [, styleId, styleBody] = match;
+    const name = styleBody.match(/<w:name\b[^>]*?w:val="([^"]+)"/)?.[1]?.toLowerCase();
+    const outline = styleBody.match(/<w:outlineLvl\b[^>]*?w:val="(\d+)"/)?.[1];
+    const headingName = name?.match(/^heading\s+(\d+)$/);
+    const titleName = name === "title";
+
+    if (headingName) {
+      headingStyles.set(styleId, Math.min(Number(headingName[1]), 6));
+    } else if (outline !== undefined) {
+      headingStyles.set(styleId, Math.min(Number(outline) + 1, 6));
+    } else if (titleName) {
+      headingStyles.set(styleId, 1);
+    }
+  }
+
+  return headingStyles;
+}
+
+function extractDocxParagraphText(paragraphXml: string) {
+  const parts: string[] = [];
+  const tokenRegex = /<w:t\b[^>]*>([\s\S]*?)<\/w:t>|<w:tab\b[^>]*\/>|<w:br\b[^>]*\/>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenRegex.exec(paragraphXml))) {
+    if (match[1] !== undefined) {
+      parts.push(decodeXmlText(match[1]));
+    } else if (match[0].startsWith("<w:tab")) {
+      parts.push("\t");
+    } else {
+      parts.push("\n");
+    }
+  }
+
+  return normalizeText(parts.join(""));
+}
+
+function docxXmlToMarkdown(documentXml: string, stylesXml: string) {
+  const headingStyles = parseDocxHeadingStyles(stylesXml);
+  const lines: string[] = [];
+  const paragraphRegex = /<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g;
+  let match: RegExpExecArray | null;
+
+  while ((match = paragraphRegex.exec(documentXml))) {
+    const paragraphXml = match[1];
+    const text = extractDocxParagraphText(paragraphXml);
+
+    if (!text) {
+      lines.push("");
+      continue;
+    }
+
+    const styleId = paragraphXml.match(/<w:pStyle\b[^>]*?w:val="([^"]+)"/)?.[1];
+    const headingLevel = styleId ? headingStyles.get(styleId) : undefined;
+
+    if (headingLevel) {
+      lines.push(`${"#".repeat(headingLevel)} ${text}`);
+      continue;
+    }
+
+    if (/<w:numPr\b/.test(paragraphXml)) {
+      lines.push(`- ${text}`);
+      continue;
+    }
+
+    lines.push(text);
+  }
+
+  return normalizeText(lines.join("\n\n"));
+}
+
 export function chunkText(text: string, chunkSize = 900, overlap = 180) {
   const chunks: string[] = [];
   let start = 0;
@@ -76,6 +167,21 @@ async function extractTextFromDocument(filePath: string) {
 
   if (extension === ".txt" || extension === ".md") {
     return normalizeText(await readFile(filePath, "utf8"));
+  }
+
+  if (extension === ".docx") {
+    try {
+      const [documentXml, stylesXml] = await Promise.all([
+        unzipDocxEntry(filePath, "word/document.xml"),
+        unzipDocxEntry(filePath, "word/styles.xml").catch(() => ""),
+      ]);
+      const markdown = docxXmlToMarkdown(documentXml, stylesXml);
+      if (markdown) {
+        return markdown;
+      }
+    } catch {
+      // Fall back to textutil for malformed or non-standard docx files.
+    }
   }
 
   if ([".doc", ".docx", ".rtf", ".odt"].includes(extension)) {
@@ -142,12 +248,14 @@ export async function indexDocumentLocally({
     id: `${timestamp}:${safeFilename}`,
     filename,
     uploadedAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
     status: "indexed",
     source,
     storedPath,
     markdownPath,
     richTextPath,
     chunkCount: chunks.length,
+    chunks,
   };
 
   state.documents = [

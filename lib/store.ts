@@ -11,6 +11,8 @@ export type IndexedDocument = {
   markdownPath: string;
   richTextPath: string;
   chunkCount: number;
+  chunks?: string[];
+  updatedAt?: string;
 };
 
 type LegacyIndexedDocument = IndexedDocument & {
@@ -32,6 +34,35 @@ export const RICH_TEXT_DIR = path.join(DATA_DIR, "rich-text");
 const DEFAULT_STATE: AppState = {
   documents: [],
 };
+
+function normalizeStoredText(text: string) {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/\u00a0/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function chunkStoredText(text: string, chunkSize = 900, overlap = 180) {
+  const chunks: string[] = [];
+  let start = 0;
+
+  while (start < text.length) {
+    const end = Math.min(start + chunkSize, text.length);
+    const chunk = text.slice(start, end).trim();
+    if (chunk) {
+      chunks.push(chunk);
+    }
+
+    if (end >= text.length) {
+      break;
+    }
+
+    start = Math.max(end - overlap, start + 1);
+  }
+
+  return chunks;
+}
 
 async function ensureDataDir() {
   await mkdir(DATA_DIR, { recursive: true });
@@ -113,10 +144,20 @@ export async function readState(): Promise<AppState> {
       ? (parsed.documents as LegacyIndexedDocument[])
       : [];
     const migratedDocuments: IndexedDocument[] = [];
+    let shouldRewriteState = false;
 
     for (const document of incoming) {
       if (document.markdownPath && document.richTextPath) {
-        migratedDocuments.push(document as IndexedDocument);
+        const nextDocument = document as IndexedDocument;
+
+        if (!Array.isArray(nextDocument.chunks) && (await fileExists(nextDocument.markdownPath))) {
+          const markdown = normalizeStoredText(await readFile(nextDocument.markdownPath, "utf8"));
+          nextDocument.chunks = chunkStoredText(markdown);
+          nextDocument.chunkCount = nextDocument.chunks.length;
+          shouldRewriteState = true;
+        }
+
+        migratedDocuments.push(nextDocument);
         continue;
       }
 
@@ -129,6 +170,8 @@ export async function readState(): Promise<AppState> {
     if (migratedDocuments.length !== incoming.length) {
       await writeState({ documents: migratedDocuments });
     } else if (incoming.some((document) => !("markdownPath" in document))) {
+      await writeState({ documents: migratedDocuments });
+    } else if (shouldRewriteState) {
       await writeState({ documents: migratedDocuments });
     }
 

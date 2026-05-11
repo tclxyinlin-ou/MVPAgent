@@ -73,7 +73,10 @@ async function searchDocumentsInScope(
   const results: SearchResult[] = [];
 
   for (const document of documents) {
-    const chunks = await readMarkdownChunks(document.markdownPath);
+    const chunks =
+      Array.isArray(document.chunks) && document.chunks.length
+        ? document.chunks
+        : await readMarkdownChunks(document.markdownPath);
     for (const chunk of chunks) {
       const score = scoreChunk(query, chunk);
       if (score > 0) {
@@ -87,6 +90,36 @@ async function searchDocumentsInScope(
   }
 
   return results.sort((a, b) => b.score - a.score).slice(0, limit);
+}
+
+export async function executeFastDocumentPlan(
+  question: string,
+  documentId?: string,
+): Promise<AgentPlanResult> {
+  const state = await readState();
+  if (state.documents.length === 0) {
+    throw new Error("知识库还是空的，请先导入至少一份文档。");
+  }
+
+  const scopedDocuments = documentId
+    ? state.documents.filter((document) => document.id === documentId)
+    : state.documents;
+
+  if (scopedDocuments.length === 0) {
+    throw new Error("当前选中的文档不存在，请重新选择。");
+  }
+
+  const sources = await searchDocumentsInScope(scopedDocuments, question, 5);
+
+  return {
+    sources,
+    steps: [
+      {
+        tool: "search_documents",
+        summary: `快速检索当前文档，命中 ${sources.length} 条结果`,
+      },
+    ],
+  };
 }
 
 async function lookupChannel(query: string) {

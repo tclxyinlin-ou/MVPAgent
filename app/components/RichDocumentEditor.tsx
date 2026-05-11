@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { EditorContent, useEditor } from "@tiptap/react";
 import StarterKit from "@tiptap/starter-kit";
 import Underline from "@tiptap/extension-underline";
@@ -62,6 +62,13 @@ type Props = {
   disabled?: boolean;
 };
 
+type OutlineItem = {
+  id: string;
+  level: number;
+  pos: number;
+  text: string;
+};
+
 function ToolbarButton({
   label,
   active,
@@ -86,6 +93,9 @@ function ToolbarButton({
 }
 
 export default function RichDocumentEditor({ value, onChange, disabled }: Props) {
+  const [outline, setOutline] = useState<OutlineItem[]>([]);
+  const editorScrollRef = useRef<HTMLDivElement | null>(null);
+
   const editor = useEditor({
     immediatelyRender: false,
     extensions: [
@@ -123,6 +133,34 @@ export default function RichDocumentEditor({ value, onChange, disabled }: Props)
     },
   });
 
+  const refreshOutline = useCallback(() => {
+    if (!editor) {
+      return;
+    }
+
+    const next: OutlineItem[] = [];
+
+    editor.state.doc.descendants((node, pos) => {
+      if (node.type.name !== "heading") {
+        return;
+      }
+
+      const text = node.textContent.trim();
+      if (!text) {
+        return;
+      }
+
+      next.push({
+        id: `doc-heading-${pos}`,
+        level: Number(node.attrs.level) || 1,
+        pos,
+        text,
+      });
+    });
+
+    setOutline(next);
+  }, [editor]);
+
   useEffect(() => {
     if (!editor) {
       return;
@@ -133,7 +171,46 @@ export default function RichDocumentEditor({ value, onChange, disabled }: Props)
     }
 
     editor.setEditable(!disabled);
-  }, [editor, value, disabled]);
+    window.requestAnimationFrame(refreshOutline);
+  }, [editor, value, disabled, refreshOutline]);
+
+  useEffect(() => {
+    if (!editor) {
+      return;
+    }
+
+    refreshOutline();
+
+    editor.on("update", refreshOutline);
+    editor.on("selectionUpdate", refreshOutline);
+
+    return () => {
+      editor.off("update", refreshOutline);
+      editor.off("selectionUpdate", refreshOutline);
+    };
+  }, [editor, refreshOutline]);
+
+  function scrollToHeading(item: OutlineItem) {
+    if (!editor) {
+      return;
+    }
+
+    const target = editor.view.nodeDOM(item.pos) as HTMLElement | null;
+    const scrollContainer = editorScrollRef.current;
+
+    if (!target || !scrollContainer) {
+      return;
+    }
+
+    const containerTop = scrollContainer.getBoundingClientRect().top;
+    const targetTop = target.getBoundingClientRect().top;
+    const offset = targetTop - containerTop + scrollContainer.scrollTop - 18;
+
+    scrollContainer.scrollTo({
+      top: Math.max(offset, 0),
+      behavior: "smooth",
+    });
+  }
 
   if (!editor) {
     return null;
@@ -274,7 +351,34 @@ export default function RichDocumentEditor({ value, onChange, disabled }: Props)
         />
       </div>
 
-      <EditorContent editor={editor} className="rich-editor-content" />
+      <div className="rich-editor-body">
+        <div className="rich-editor-scroll" ref={editorScrollRef}>
+          <EditorContent editor={editor} className="rich-editor-content" />
+        </div>
+
+        <aside className="rich-outline" aria-label="文档大纲">
+          <div className="rich-outline-sticky">
+            <div className="rich-outline-title">文档大纲</div>
+            {outline.length ? (
+              <nav className="rich-outline-list">
+                {outline.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className="rich-outline-item"
+                    style={{ paddingLeft: `${12 + (item.level - 1) * 14}px` }}
+                    onClick={() => scrollToHeading(item)}
+                  >
+                    {item.text}
+                  </button>
+                ))}
+              </nav>
+            ) : (
+              <p className="rich-outline-empty">暂无标题</p>
+            )}
+          </div>
+        </aside>
+      </div>
     </div>
   );
 }

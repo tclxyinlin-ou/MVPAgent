@@ -96,10 +96,13 @@ export async function PUT(
     "utf8",
   );
 
-  const nextChunkCount = chunkText(normalized).length;
+  const nextChunks = chunkText(normalized);
+  const nextChunkCount = nextChunks.length;
   target.state.documents[target.index] = {
     ...target.document,
     chunkCount: nextChunkCount,
+    chunks: nextChunks,
+    updatedAt: new Date().toISOString(),
   };
   await writeState(target.state);
 

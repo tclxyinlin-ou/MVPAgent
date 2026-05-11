@@ -1,11 +1,53 @@
 import { NextRequest, NextResponse } from "next/server";
 import {
-  executeAgentPlan,
+  executeFastDocumentPlan,
   generateFinalAnswer,
   streamFinalAnswer,
 } from "@/lib/agent";
+import { readState } from "@/lib/store";
 
 export const runtime = "nodejs";
+
+type CachedAnswer = {
+  answer: string;
+  steps: Array<{
+    tool: string;
+    summary: string;
+  }>;
+  sources: Array<{
+    filename: string;
+    score: number | null;
+    excerpt: string;
+  }>;
+  createdAt: number;
+};
+
+const ASK_CACHE = new Map<string, CachedAnswer>();
+const ASK_CACHE_LIMIT = 80;
+
+async function getCacheKey(question: string, documentId?: string) {
+  const state = await readState();
+  const documentVersions = documentId
+    ? state.documents
+        .filter((document) => document.id === documentId)
+        .map((document) => `${document.id}:${document.updatedAt || document.uploadedAt}:${document.chunkCount}`)
+    : state.documents.map(
+        (document) => `${document.id}:${document.updatedAt || document.uploadedAt}:${document.chunkCount}`,
+      );
+
+  return `${documentVersions.join("|")}::${question.trim().toLowerCase()}`;
+}
+
+function writeAskCache(key: string, value: CachedAnswer) {
+  if (ASK_CACHE.size >= ASK_CACHE_LIMIT) {
+    const oldestKey = ASK_CACHE.keys().next().value as string | undefined;
+    if (oldestKey) {
+      ASK_CACHE.delete(oldestKey);
+    }
+  }
+
+  ASK_CACHE.set(key, value);
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -32,7 +74,34 @@ export async function POST(request: NextRequest) {
         };
 
         try {
-          const plan = await executeAgentPlan(question, documentId);
+          const cacheKey = await getCacheKey(question, documentId);
+          const cached = ASK_CACHE.get(cacheKey);
+
+          if (cached) {
+            send({
+              type: "steps",
+              steps: [
+                ...cached.steps,
+                {
+                  tool: "cache",
+                  summary: "命中最近问答缓存，直接返回结果",
+                },
+              ],
+            });
+            send({
+              type: "sources",
+              sources: cached.sources,
+            });
+            send({
+              type: "answer",
+              delta: cached.answer,
+            });
+            send({ type: "done" });
+            controller.close();
+            return;
+          }
+
+          const plan = await executeFastDocumentPlan(question, documentId);
 
           send({
             type: "steps",
@@ -55,9 +124,10 @@ export async function POST(request: NextRequest) {
           }
 
           let hasDelta = false;
+          let finalAnswer = "";
 
           try {
-            await streamFinalAnswer(question, plan.sources, (delta) => {
+            finalAnswer = await streamFinalAnswer(question, plan.sources, (delta) => {
               hasDelta = true;
               send({
                 type: "answer",
@@ -66,6 +136,7 @@ export async function POST(request: NextRequest) {
             });
           } catch {
             const fallback = await generateFinalAnswer(question, plan.sources);
+            finalAnswer = fallback;
             hasDelta = true;
             send({
               type: "answer",
@@ -75,9 +146,19 @@ export async function POST(request: NextRequest) {
 
           if (!hasDelta) {
             const fallback = await generateFinalAnswer(question, plan.sources);
+            finalAnswer = fallback;
             send({
               type: "answer",
               delta: fallback,
+            });
+          }
+
+          if (finalAnswer) {
+            writeAskCache(cacheKey, {
+              answer: finalAnswer,
+              steps: plan.steps,
+              sources: plan.sources,
+              createdAt: Date.now(),
             });
           }
 
