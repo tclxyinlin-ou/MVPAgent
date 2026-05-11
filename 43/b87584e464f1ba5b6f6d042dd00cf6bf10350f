@@ -1,0 +1,58 @@
+app/api/documents/[id]/route.ts
+  s_e28f3e4d0d5714::t_d26ab52f3ddd3b 99-100,104
+  s_e28f3e4d0d5714::t_ae6a53bdad256f 105
+app/page.tsx
+  s_e28f3e4d0d5714::t_e094b7ccfc4f94 90,139,173,306,763,770,823,825-826,830,834,847
+  s_e28f3e4d0d5714::t_cf1727c52dd508 101,166,174-175,882-884
+  s_e28f3e4d0d5714::t_0909d09ec70214 71-78,103,137,168,170-172,303,885-888
+  s_e28f3e4d0d5714::t_ae6f64f7698f7c 102,138,167,176,874-881
+  s_e28f3e4d0d5714::t_242b62b3ada712 177-179
+  s_e28f3e4d0d5714::t_d9ea34eb025e55 305,307-309,824,827-829
+  s_e28f3e4d0d5714::t_6deed4fc71fbb3 399-404
+app/components/RichDocumentEditor.tsx
+  s_e28f3e4d0d5714::t_22e4b6c13e4c14 175
+  s_e28f3e4d0d5714::t_4b8e73db101c24 65-67,69-71,96,98,136-140,160-163,174,176-191,194-197,211-213,354,358-369,371-381
+  s_e28f3e4d0d5714::t_28a005864c1a4d 3,97,199-210,355-357
+  s_e28f3e4d0d5714::t_6ec1433d468ad7 68,141-159,193,198,370
+lib/agent.ts
+  s_e28f3e4d0d5714::t_106e78bcf85bdc 76-79,95-122
+app/api/ask/route.ts
+  s_e28f3e4d0d5714::t_e9de134da521e8 7,28-38,77
+  s_e28f3e4d0d5714::t_4ea6b3a465f6a8 3,11-27,39-51,78-104,127,130,139,149,156-161
+lib/openai.ts
+  s_e28f3e4d0d5714::t_344b1e4de9a6c2 258
+  s_e28f3e4d0d5714::t_5ee29e9b30a881 53-143,172-184
+  s_e28f3e4d0d5714::t_822c54b819812b 251
+lib/store.ts
+  s_e28f3e4d0d5714::t_206ee38580ff37 38-66,154-155
+  s_e28f3e4d0d5714::t_cb2934a91ac959 15
+  s_e28f3e4d0d5714::t_c8ac51bdc612e7 14,151-153,156,158-160
+  s_e28f3e4d0d5714::t_947914ab51906b 147,157,174
+  s_e28f3e4d0d5714::t_1b566fc6d8167a 175
+app/globals.css
+  s_e28f3e4d0d5714::t_ccd7939ddd401b 240-241,243,245-249,258-259,264,370,949-956
+  s_e28f3e4d0d5714::t_25abb4172266e0 252-257,275-281,357-359,361-368,372-412
+  s_e28f3e4d0d5714::t_afe81c1a785dd4 242,244,260,360,369,371
+  s_e28f3e4d0d5714::t_bf97e567e46ade 938-948,957-958
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "43b87584e464f1ba5b6f6d042dd00cf6bf10350f",
+  "prompts": {},
+  "humans": {
+    "h_a9b81e2ef51d83": {
+      "author": "ouyinlin <suyu15008507430@163.com>"
+    }
+  },
+  "sessions": {
+    "s_e28f3e4d0d5714": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e0175-7427-71b1-90fb-04684bb6912c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "ouyinlin <suyu15008507430@163.com>"
+    }
+  }
+}
