@@ -1,0 +1,21 @@
+lib/agent.ts
+  s_e28f3e4d0d5714::t_611f7da16d25c2 76-83
+  s_e28f3e4d0d5714::t_09d882f0978e54 293
+  s_e28f3e4d0d5714::t_b8b8d31c8da22d 63-75,84-98,148-166,170
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.4",
+  "base_commit_sha": "eeeb29411a115296fdbb66bcdd2a0c23a079694b",
+  "prompts": {},
+  "sessions": {
+    "s_e28f3e4d0d5714": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e0175-7427-71b1-90fb-04684bb6912c",
+        "model": "gpt-5.5"
+      },
+      "human_author": "ouyinlin <suyu15008507430@163.com>"
+    }
+  }
+}
