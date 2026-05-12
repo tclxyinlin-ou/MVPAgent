@@ -60,6 +60,42 @@ function scoreChunk(question: string, chunk: string) {
   return matches + phraseBonus;
 }
 
+function isOverviewQuestion(question: string) {
+  return /多少|几个|有哪些|列出|总结|概括|统计|数量|全部|所有|分类|渠道/.test(question);
+}
+
+async function buildDocumentOverviewSources(documents: IndexedDocument[], limit = 8) {
+  const results: SearchResult[] = [];
+
+  for (const document of documents) {
+    const chunks =
+      Array.isArray(document.chunks) && document.chunks.length
+        ? document.chunks
+        : await readMarkdownChunks(document.markdownPath);
+
+    const priorityChunks = chunks.filter((chunk) =>
+      /渠道|环境|支付|站|app|pc|m站|微信|支付宝|hopegoo/i.test(chunk),
+    );
+    const selectedChunks = [...priorityChunks, ...chunks].filter(
+      (chunk, index, list) => list.indexOf(chunk) === index,
+    );
+
+    for (const [index, chunk] of selectedChunks.entries()) {
+      results.push({
+        filename: document.filename,
+        score: 1,
+        excerpt: chunk,
+      });
+
+      if (index + 1 >= limit) {
+        break;
+      }
+    }
+  }
+
+  return results.slice(0, limit);
+}
+
 async function searchDocuments(query: string, limit = 4) {
   const state = await readState();
   return searchDocumentsInScope(state.documents, query, limit);
@@ -109,16 +145,29 @@ export async function executeFastDocumentPlan(
     throw new Error("当前选中的文档不存在，请重新选择。");
   }
 
-  const sources = await searchDocumentsInScope(scopedDocuments, question, 5);
+  let sources = await searchDocumentsInScope(scopedDocuments, question, 5);
+  const steps: AgentPlanResult["steps"] = [
+    {
+      tool: "search_documents",
+      summary: `快速检索当前文档，命中 ${sources.length} 条结果`,
+    },
+  ];
+
+  if (sources.length === 0 || isOverviewQuestion(question)) {
+    const overviewSources = await buildDocumentOverviewSources(scopedDocuments, 8);
+
+    if (overviewSources.length) {
+      sources = sources.length ? sources : overviewSources;
+      steps.push({
+        tool: "search_documents",
+        summary: `补充文档概要上下文 ${overviewSources.length} 段，用于统计/概括类问题`,
+      });
+    }
+  }
 
   return {
     sources,
-    steps: [
-      {
-        tool: "search_documents",
-        summary: `快速检索当前文档，命中 ${sources.length} 条结果`,
-      },
-    ],
+    steps,
   };
 }
 
@@ -241,7 +290,7 @@ function buildFinalAnswerMessages(question: string, sources: SearchResult[]) {
     {
       role: "system" as const,
       content:
-        "你是一个文档问答助手。基于给定工具结果回答，先给结论，再给简短依据。如果证据不足，要明确说不知道。",
+        "你是一个文档问答助手。基于给定工具结果回答，先给结论，再给简短依据。遇到统计、数量、列举、总结类问题，要从证据里归纳、去重并计数；如果证据不足，要明确说明口径和不确定性，不要编造。",
     },
     {
       role: "user" as const,
