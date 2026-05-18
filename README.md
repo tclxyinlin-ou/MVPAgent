@@ -17,6 +17,7 @@
 - 本地检索相关片段
 - 多文档 tab 切换，提问只针对当前文档
 - 使用兼容 OpenAI `chat/completions` 的模型驱动轻量 Agent 循环
+- 页面内可直接设置 `OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL`，并切换当前模型
 - 在页面展示答案和命中的文档片段
 - 展示 Agent 的工具调用步骤
 - 内置导入当前目录示例文档按钮
@@ -62,6 +63,15 @@ npm run dev
 http://localhost:3000
 ```
 
+5. 在页面左侧的“模型设置”里维护：
+
+- `OPENAI_BASE_URL`
+- `OPENAI_API_KEY`
+- `OPENAI_MODEL`
+- `可切换模型列表`
+
+保存后，后续问答会直接走新的模型配置。
+
 ## 默认示例文档
 
 页面里的“导入示例文档”按钮会导入：
@@ -76,7 +86,9 @@ http://localhost:3000
 - `app/api/upload/route.ts`: 文档上传和本地索引
 - `app/api/ask/route.ts`: 本地检索 + 模型回答
 - `app/api/status/route.ts`: 查询知识库状态
+- `app/api/model-config/route.ts`: 模型配置读取与保存
 - `lib/openai.ts`: OpenAI 兼容模型接入和本地解析逻辑
+- `lib/model-config.ts`: 运行时模型配置
 - `.mvp-docs/markdown/`: 导出的可编辑 Markdown 文档
 - `lib/store.ts`: 本地状态存储
 

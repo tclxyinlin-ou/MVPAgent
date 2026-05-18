@@ -11,21 +11,23 @@ import {
   UPLOAD_DIR,
   writeState,
 } from "@/lib/store";
+import { getActiveModelProfileSync } from "@/lib/model-config";
 import { marked } from "marked";
 
 const execFileAsync = promisify(execFile);
 
 function requireApiKey() {
-  if (!process.env.OPENAI_API_KEY) {
-    throw new Error("缺少 OPENAI_API_KEY。请先在 .env 中配置。");
+  if (!getActiveModelProfileSync().authToken) {
+    throw new Error("缺少模型密钥。请先在 .env 或模型设置里配置。");
   }
 }
 
 export function getOpenAIClient() {
   requireApiKey();
+  const config = getActiveModelProfileSync();
   return new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
-    baseURL: process.env.OPENAI_BASE_URL || undefined,
+    apiKey: config.authToken,
+    baseURL: config.baseURL || undefined,
   });
 }
 
@@ -273,5 +275,5 @@ export async function indexDocumentLocally({
 }
 
 export function getModelName() {
-  return process.env.OPENAI_MODEL || "mimo-v2.5-pro";
+  return getActiveModelProfileSync().model || "gpt-5.4";
 }

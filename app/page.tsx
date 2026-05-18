@@ -20,6 +20,19 @@ type StatusResponse = {
   documents: (IndexedDocument & { chunkCount?: number })[];
 };
 
+type ModelProfile = {
+  id: string;
+  name: string;
+  authToken: string;
+  baseURL: string;
+  model: string;
+};
+
+type ModelWorkspaceConfig = {
+  activeProfileId: string;
+  profiles: ModelProfile[];
+};
+
 type AskResponse = {
   ok: boolean;
   answer?: string;
@@ -67,6 +80,8 @@ const SAMPLE_QUESTIONS = [
 ];
 
 const ASK_TIMEOUT_MS = 45000;
+const DEFAULT_OPENAI_BASE_URL = "https://token-plan-sgp.xiaomimimo.com/v1";
+const DEFAULT_OPENAI_MODEL = "mimo-v2.5-pro";
 
 function normalizeRichTextForDirtyCheck(html: string) {
   return html
@@ -76,8 +91,42 @@ function normalizeRichTextForDirtyCheck(html: string) {
     .trim();
 }
 
+function getLocalProfileValidationError(profile: ModelProfile) {
+  if (!profile.name.trim()) {
+    return "模型 tab 名称不能为空。";
+  }
+
+  if (!profile.authToken.trim()) {
+    return `模型「${profile.name}」缺少 OPENAI_API_KEY。`;
+  }
+
+  if (!profile.baseURL.trim()) {
+    return `模型「${profile.name}」缺少 OPENAI_BASE_URL。`;
+  }
+
+  if (!profile.model.trim()) {
+    return `模型「${profile.name}」缺少 OPENAI_MODEL。`;
+  }
+
+  if (/\/anthropic\/?$/i.test(profile.baseURL.trim())) {
+    return `模型「${profile.name}」当前配置的是 Anthropic 兼容端点。`;
+  }
+
+  return null;
+}
+
 export default function HomePage() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
+  const [modelConfig, setModelConfig] = useState<ModelWorkspaceConfig | null>(null);
+  const [editingProfileId, setEditingProfileId] = useState<string | null>(null);
+  const [profileNameInput, setProfileNameInput] = useState("");
+  const [modelBaseURL, setModelBaseURL] = useState("");
+  const [selectedModel, setSelectedModel] = useState("");
+  const [modelTokenInput, setModelTokenInput] = useState("");
+  const [isSavingModelConfig, setIsSavingModelConfig] = useState(false);
+  const [isModelModalOpen, setIsModelModalOpen] = useState(false);
+  const [isModelInfoOpen, setIsModelInfoOpen] = useState(false);
+  const [pendingDeleteProfileId, setPendingDeleteProfileId] = useState<string | null>(null);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [pendingDeleteDocumentId, setPendingDeleteDocumentId] = useState<string | null>(null);
   const [question, setQuestion] = useState(SAMPLE_QUESTIONS[0]);
@@ -102,6 +151,7 @@ export default function HomePage() {
   const ignoreEditorChangeRef = useRef(false);
   const acceptInitialEditorHtmlRef = useRef(false);
   const savedRichTextContentRef = useRef("");
+  const currentProfile = getCurrentProfile();
 
   function showToast(kind: "error" | "success", message: string) {
     if (toastTimerRef.current) {
@@ -112,6 +162,44 @@ export default function HomePage() {
     toastTimerRef.current = setTimeout(() => {
       setToast(null);
     }, 3200);
+  }
+
+  function getCurrentProfile(config = modelConfig) {
+    if (!config) {
+      return null;
+    }
+
+    return (
+      config.profiles.find((profile) => profile.id === config.activeProfileId) ||
+      config.profiles[0] ||
+      null
+    );
+  }
+
+  function syncProfileEditor(profile: ModelProfile | null) {
+    if (!profile) {
+      setProfileNameInput("");
+      setModelBaseURL(DEFAULT_OPENAI_BASE_URL);
+      setSelectedModel(DEFAULT_OPENAI_MODEL);
+      setModelTokenInput("");
+      return;
+    }
+
+    setProfileNameInput(profile.name);
+    setModelBaseURL(profile.baseURL);
+    setSelectedModel(profile.model);
+    setModelTokenInput(profile.authToken);
+  }
+
+  function buildNewProfileDraft() {
+    const timestamp = Date.now();
+    return {
+      id: `profile-${timestamp}`,
+      name: `新模型 ${modelConfig ? modelConfig.profiles.length + 1 : 1}`,
+      authToken: "",
+      baseURL: DEFAULT_OPENAI_BASE_URL,
+      model: DEFAULT_OPENAI_MODEL,
+    } satisfies ModelProfile;
   }
 
   async function loadStatus() {
@@ -128,6 +216,34 @@ export default function HomePage() {
 
   useEffect(() => {
     void loadStatus();
+  }, []);
+
+  async function loadModelConfig() {
+    const res = await fetch("/api/model-config");
+    const data = (await res.json()) as {
+      ok: boolean;
+      error?: string;
+      config?: ModelWorkspaceConfig;
+    };
+
+    if (!res.ok || !data.ok || !data.config) {
+      throw new Error(data.error || "读取模型配置失败。");
+    }
+
+    const nextConfig = data.config;
+    setModelConfig(nextConfig);
+    syncProfileEditor(
+      nextConfig.profiles.find((profile) => profile.id === nextConfig.activeProfileId) ||
+        nextConfig.profiles[0] ||
+        null,
+    );
+  }
+
+  useEffect(() => {
+    void loadModelConfig().catch((error) => {
+      const message = error instanceof Error ? error.message : "读取模型配置失败。";
+      showToast("error", message);
+    });
   }, []);
 
   useEffect(() => {
@@ -332,6 +448,218 @@ export default function HomePage() {
       showToast("error", message);
     } finally {
       setIsSavingMarkdown(false);
+    }
+  }
+
+  async function saveModelConfig() {
+    if (isSavingModelConfig || !modelConfig) {
+      return;
+    }
+
+    const currentProfile =
+      modelConfig.profiles.find((profile) => profile.id === editingProfileId) ||
+      (editingProfileId ? null : getCurrentProfile());
+
+    const nextProfileName = profileNameInput.trim();
+    const nextModel = selectedModel.trim();
+
+    if (!modelBaseURL.trim()) {
+      showToast("error", "先填写 Base URL。");
+      return;
+    }
+
+    if (!nextProfileName) {
+      showToast("error", "先填写 tab 名称。");
+      return;
+    }
+
+    if (!nextModel) {
+      showToast("error", "先填写当前模型。");
+      return;
+    }
+
+    setIsSavingModelConfig(true);
+
+    try {
+      const nextProfile = {
+        id: currentProfile?.id || `profile-${Date.now()}`,
+        name: nextProfileName,
+        authToken: modelTokenInput.trim(),
+        baseURL: modelBaseURL.trim(),
+        model: nextModel,
+      } satisfies ModelProfile;
+
+      const nextProfiles = currentProfile
+        ? modelConfig.profiles.map((profile) =>
+            profile.id === currentProfile.id ? nextProfile : profile,
+          )
+        : [...modelConfig.profiles, nextProfile];
+
+      const res = await fetch("/api/model-config", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          activeProfileId: nextProfile.id,
+          profiles: nextProfiles,
+        }),
+      });
+
+      const data = (await res.json()) as {
+        ok: boolean;
+        error?: string;
+        config?: ModelWorkspaceConfig;
+      };
+
+      if (!res.ok || !data.ok || !data.config) {
+        throw new Error(data.error || "保存模型配置失败。");
+      }
+
+      const nextConfig = data.config;
+      setModelConfig(nextConfig);
+      syncProfileEditor(
+        nextConfig.profiles.find((profile) => profile.id === nextConfig.activeProfileId) ||
+          nextConfig.profiles[0] ||
+          null,
+      );
+      setEditingProfileId(nextConfig.activeProfileId);
+      setIsModelModalOpen(false);
+      setNotice(`模型配置「${nextProfileName}」已保存，后续提问会直接使用新配置。`);
+      showToast("success", "模型配置已保存。");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "保存模型配置失败。";
+      setNotice(message);
+      showToast("error", message);
+    } finally {
+      setIsSavingModelConfig(false);
+    }
+  }
+
+  async function switchModelTab(profileId: string) {
+    if (!modelConfig || !profileId || profileId === modelConfig.activeProfileId || isSavingModelConfig) {
+      return;
+    }
+    setIsSavingModelConfig(true);
+
+    try {
+      const res = await fetch("/api/model-config", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          activeProfileId: profileId,
+          profiles: modelConfig.profiles,
+        }),
+      });
+
+      const data = (await res.json()) as {
+        ok: boolean;
+        error?: string;
+        config?: ModelWorkspaceConfig;
+      };
+
+      if (!res.ok || !data.ok || !data.config) {
+        throw new Error(data.error || "切换模型失败。");
+      }
+
+      const nextConfig = data.config;
+      setModelConfig(nextConfig);
+      const nextProfile =
+        nextConfig.profiles.find((profile) => profile.id === nextConfig.activeProfileId) ||
+        nextConfig.profiles[0] ||
+        null;
+      syncProfileEditor(nextProfile);
+      setEditingProfileId(nextProfile?.id || null);
+      setNotice(`已切换到 ${nextProfile?.name || "当前模型"}。后续提问会直接使用这套配置。`);
+      showToast("success", `已切换到 ${nextProfile?.name || "当前模型"}`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "切换模型失败。";
+      setNotice(message);
+      showToast("error", message);
+    } finally {
+      setIsSavingModelConfig(false);
+    }
+  }
+
+  function openCreateModelModal() {
+    const draft = buildNewProfileDraft();
+    setEditingProfileId(draft.id);
+    syncProfileEditor(draft);
+    setIsModelModalOpen(true);
+  }
+
+  function openEditCurrentModelModal() {
+    const profile = getCurrentProfile();
+    setEditingProfileId(profile?.id || null);
+    syncProfileEditor(profile);
+    setIsModelModalOpen(true);
+  }
+
+  async function deleteModelProfile(profileId: string) {
+    if (!modelConfig || isSavingModelConfig) {
+      return;
+    }
+
+    if (modelConfig.profiles.length <= 1) {
+      showToast("error", "至少保留一个模型 tab，不能删除最后一个。");
+      return;
+    }
+
+    const target = modelConfig.profiles.find((profile) => profile.id === profileId);
+    if (!target) {
+      showToast("error", "模型 tab 不存在。");
+      return;
+    }
+
+    setIsSavingModelConfig(true);
+
+    try {
+      const nextProfiles = modelConfig.profiles.filter((profile) => profile.id !== profileId);
+      const nextActiveProfileId =
+        modelConfig.activeProfileId === profileId
+          ? nextProfiles[0]?.id || ""
+          : modelConfig.activeProfileId;
+
+      const res = await fetch("/api/model-config", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          activeProfileId: nextActiveProfileId,
+          profiles: nextProfiles,
+        }),
+      });
+
+      const data = (await res.json()) as {
+        ok: boolean;
+        error?: string;
+        config?: ModelWorkspaceConfig;
+      };
+
+      if (!res.ok || !data.ok || !data.config) {
+        throw new Error(data.error || "删除模型配置失败。");
+      }
+
+      const nextConfig = data.config;
+      setModelConfig(nextConfig);
+      syncProfileEditor(
+        nextConfig.profiles.find((profile) => profile.id === nextConfig.activeProfileId) ||
+          nextConfig.profiles[0] ||
+          null,
+      );
+      setEditingProfileId(nextConfig.activeProfileId);
+      setPendingDeleteProfileId(null);
+      setNotice(`模型配置「${target.name}」已删除。`);
+      showToast("success", "模型 tab 删除成功。");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "删除模型配置失败。";
+      setNotice(message);
+      showToast("error", message);
+    } finally {
+      setIsSavingModelConfig(false);
     }
   }
 
@@ -546,7 +874,7 @@ export default function HomePage() {
         <div className="topbar-meta">
           <span>文档问答</span>
           <span>Agent Mode</span>
-          <span>MiMo Compatible</span>
+          <span>{currentProfile?.name || "模型设置"}</span>
         </div>
       </header>
 
@@ -630,6 +958,85 @@ export default function HomePage() {
             </div>
 
             <div className="status">{notice}</div>
+
+            <div className="model-config-card">
+              <div className="section-head">
+                <div>
+                  <h3>模型切换</h3>
+                </div>
+                <div className="model-header-actions">
+                  <button
+                    type="button"
+                    className="model-add-button"
+                    onClick={openCreateModelModal}
+                    aria-label="新增模型 tab"
+                    title="新增模型 tab"
+                  >
+                    +
+                  </button>
+                  <button
+                    type="button"
+                    className="model-edit-button"
+                    onClick={openEditCurrentModelModal}
+                    aria-label="编辑当前模型"
+                    title="编辑当前模型"
+                    disabled={!currentProfile}
+                  >
+                    ✎
+                  </button>
+                  <button
+                    type="button"
+                    className="model-delete-icon-button"
+                    onClick={() => setPendingDeleteProfileId(currentProfile?.id || null)}
+                    aria-label="删除当前模型"
+                    title="删除当前模型"
+                    disabled={!currentProfile || (modelConfig?.profiles.length || 0) <= 1}
+                  >
+                    −
+                  </button>
+                  <button
+                    type="button"
+                    className="model-info-button"
+                    onClick={() => setIsModelInfoOpen(true)}
+                    aria-label="查看当前模型配置"
+                    title="查看当前模型配置"
+                  >
+                    i
+                  </button>
+                </div>
+              </div>
+
+              <div className="model-tab-row">
+                {modelConfig?.profiles.map((profile) => (
+                  <div
+                    key={profile.id}
+                    className={`model-tab-wrap ${
+                      getLocalProfileValidationError(profile) ? "model-tab-wrap-error" : ""
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      className={`model-tab ${modelConfig?.activeProfileId === profile.id ? "model-tab-active" : ""}`}
+                      disabled={isSavingModelConfig}
+                      onClick={() => void switchModelTab(profile.id)}
+                    >
+                      {profile.name}
+                    </button>
+                    <span
+                      className={`model-status-badge ${
+                        getLocalProfileValidationError(profile)
+                          ? "model-status-badge-error"
+                          : "model-status-badge-ok"
+                      }`}
+                      title={getLocalProfileValidationError(profile) || "模型配置正常"}
+                    />
+                  </div>
+                ))}
+              </div>
+              <div className="model-card-hint muted tiny">
+                当前模型：{currentProfile?.name || "未选择"} · {currentProfile?.baseURL || DEFAULT_OPENAI_BASE_URL}
+              </div>
+            </div>
 
             <div>
               <div className="section-head">
@@ -976,6 +1383,228 @@ export default function HomePage() {
           </div>
         </section>
       </section>
+
+      {isModelModalOpen ? (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!isSavingModelConfig) {
+              setIsModelModalOpen(false);
+            }
+          }}
+        >
+          <div
+            className="modal-panel"
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div className="section-head">
+              <div>
+                <h3>
+                  {modelConfig?.profiles.some((profile) => profile.id === editingProfileId)
+                    ? "编辑模型配置"
+                    : "新增模型配置"}
+                </h3>
+                <p className="muted tiny">
+                  在这里维护当前 tab 的独立模型配置。
+                </p>
+              </div>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => setIsModelModalOpen(false)}
+                disabled={isSavingModelConfig}
+              >
+                关闭
+              </button>
+            </div>
+
+            <div className="model-config-banner">
+              <div>
+                <strong>当前运行模型</strong>
+                <p>{currentProfile?.model || DEFAULT_OPENAI_MODEL}</p>
+              </div>
+              <button
+                type="button"
+                className="model-preset-button"
+                onClick={() => {
+                  setProfileNameInput("mimo-v2.5-pro");
+                  setModelBaseURL(DEFAULT_OPENAI_BASE_URL);
+                  setSelectedModel(DEFAULT_OPENAI_MODEL);
+                  setModelTokenInput(modelTokenInput);
+                }}
+              >
+                使用 MiMo 默认
+              </button>
+            </div>
+
+            <label className="field">
+              <span className="muted tiny">Tab 名称</span>
+              <input
+                className="text-input"
+                value={profileNameInput}
+                onChange={(event) => setProfileNameInput(event.target.value)}
+                placeholder="例如：MiMo 正式"
+              />
+            </label>
+
+            <label className="field">
+              <span className="muted tiny">OPENAI_BASE_URL</span>
+              <input
+                className="text-input"
+                value={modelBaseURL}
+                onChange={(event) => setModelBaseURL(event.target.value)}
+                placeholder={DEFAULT_OPENAI_BASE_URL}
+              />
+            </label>
+
+            <label className="field">
+              <span className="muted tiny">OPENAI_API_KEY</span>
+              <input
+                className="text-input"
+                type="text"
+                value={modelTokenInput}
+                onChange={(event) => setModelTokenInput(event.target.value)}
+                placeholder="输入 OPENAI_API_KEY"
+              />
+            </label>
+
+            <label className="field">
+              <span className="muted tiny">OPENAI_MODEL</span>
+              <input
+                className="text-input"
+                value={selectedModel}
+                onChange={(event) => setSelectedModel(event.target.value)}
+                placeholder={DEFAULT_OPENAI_MODEL}
+              />
+            </label>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => setIsModelModalOpen(false)}
+                disabled={isSavingModelConfig}
+              >
+                取消
+              </button>
+              <button
+                className="button button-secondary"
+                onClick={saveModelConfig}
+                disabled={isSavingModelConfig}
+              >
+                {isSavingModelConfig ? "保存中..." : "保存模型设置"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {isModelInfoOpen ? (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            setIsModelInfoOpen(false);
+          }}
+        >
+          <div
+            className="modal-panel modal-panel-compact"
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div className="section-head">
+              <div>
+                <h3>当前模型配置</h3>
+                <p className="muted tiny">这里只展示当前生效的模型参数。</p>
+              </div>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => setIsModelInfoOpen(false)}
+              >
+                关闭
+              </button>
+            </div>
+
+            <div className="config-preview">
+              <div className="config-preview-item">
+                <span className="muted tiny">Tab 名称</span>
+                <strong>{currentProfile?.name || "未配置"}</strong>
+              </div>
+              <div className="config-preview-item">
+                <span className="muted tiny">模型名</span>
+                <strong>{currentProfile?.model || DEFAULT_OPENAI_MODEL}</strong>
+              </div>
+              <div className="config-preview-item">
+                <span className="muted tiny">OPENAI_BASE_URL</span>
+                <code>{currentProfile?.baseURL || DEFAULT_OPENAI_BASE_URL}</code>
+              </div>
+              <div className="config-preview-item">
+                <span className="muted tiny">OPENAI_API_KEY</span>
+                <code>{currentProfile?.authToken || modelTokenInput || "未配置"}</code>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {pendingDeleteProfileId ? (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!isSavingModelConfig) {
+              setPendingDeleteProfileId(null);
+            }
+          }}
+        >
+          <div
+            className="modal-panel modal-panel-compact"
+            onClick={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div className="section-head">
+              <div>
+                <h3>确认删除模型</h3>
+                <p className="muted tiny">
+                  删除后，这个模型 tab 的独立配置会一起移除。
+                </p>
+              </div>
+            </div>
+
+            <div className="config-preview">
+              <div className="config-preview-item">
+                <span className="muted tiny">待删除模型</span>
+                <strong>
+                  {modelConfig?.profiles.find((profile) => profile.id === pendingDeleteProfileId)
+                    ?.name || "未知模型"}
+                </strong>
+              </div>
+            </div>
+
+            <div className="modal-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => setPendingDeleteProfileId(null)}
+                disabled={isSavingModelConfig}
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                className="button model-confirm-delete"
+                onClick={() => void deleteModelProfile(pendingDeleteProfileId)}
+                disabled={isSavingModelConfig}
+              >
+                {isSavingModelConfig ? "删除中..." : "二次确认删除"}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {toast ? (
         <div className={`toast toast-${toast.kind}`} role="status" aria-live="polite">

@@ -1,6 +1,5 @@
 node_modules
 .next
-.env
 .mvp-docs
 tsconfig.tsbuildinfo
 npm-debug.log*
