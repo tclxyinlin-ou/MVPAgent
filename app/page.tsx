@@ -127,6 +127,7 @@ export default function HomePage() {
   const [isModelModalOpen, setIsModelModalOpen] = useState(false);
   const [isModelInfoOpen, setIsModelInfoOpen] = useState(false);
   const [pendingDeleteProfileId, setPendingDeleteProfileId] = useState<string | null>(null);
+  const [draggingProfileId, setDraggingProfileId] = useState<string | null>(null);
   const [activeDocumentId, setActiveDocumentId] = useState<string | null>(null);
   const [pendingDeleteDocumentId, setPendingDeleteDocumentId] = useState<string | null>(null);
   const [question, setQuestion] = useState(SAMPLE_QUESTIONS[0]);
@@ -663,6 +664,58 @@ export default function HomePage() {
     }
   }
 
+  async function reorderModelProfiles(fromId: string, toId: string) {
+    if (!modelConfig || fromId === toId || isSavingModelConfig) {
+      return;
+    }
+
+    const profiles = [...modelConfig.profiles];
+    const fromIndex = profiles.findIndex((profile) => profile.id === fromId);
+    const toIndex = profiles.findIndex((profile) => profile.id === toId);
+
+    if (fromIndex === -1 || toIndex === -1) {
+      return;
+    }
+
+    const [moved] = profiles.splice(fromIndex, 1);
+    profiles.splice(toIndex, 0, moved);
+
+    setIsSavingModelConfig(true);
+
+    try {
+      const res = await fetch("/api/model-config", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          activeProfileId: modelConfig.activeProfileId,
+          profiles,
+        }),
+      });
+
+      const data = (await res.json()) as {
+        ok: boolean;
+        error?: string;
+        config?: ModelWorkspaceConfig;
+      };
+
+      if (!res.ok || !data.ok || !data.config) {
+        throw new Error(data.error || "模型排序保存失败。");
+      }
+
+      setModelConfig(data.config);
+      showToast("success", "模型 tab 顺序已更新。");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "模型排序保存失败。";
+      setNotice(message);
+      showToast("error", message);
+    } finally {
+      setDraggingProfileId(null);
+      setIsSavingModelConfig(false);
+    }
+  }
+
   async function deleteDocument(documentId: string) {
     if (isPending || isSavingMarkdown || isStreaming) {
       return;
@@ -1012,7 +1065,25 @@ export default function HomePage() {
                     key={profile.id}
                     className={`model-tab-wrap ${
                       getLocalProfileValidationError(profile) ? "model-tab-wrap-error" : ""
+                    } ${
+                      draggingProfileId === profile.id ? "model-tab-wrap-dragging" : ""
                     }`}
+                    draggable
+                    onDragStart={() => {
+                      setDraggingProfileId(profile.id);
+                    }}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      if (draggingProfileId && draggingProfileId !== profile.id) {
+                        void reorderModelProfiles(draggingProfileId, profile.id);
+                      }
+                    }}
+                    onDragEnd={() => {
+                      setDraggingProfileId(null);
+                    }}
                   >
                     <button
                       type="button"

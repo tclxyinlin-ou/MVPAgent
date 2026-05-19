@@ -583,18 +583,34 @@ textarea {
 
 .model-tab-row {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 10px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 6px;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+}
+
+.model-tab-row::-webkit-scrollbar {
+  display: none;
 }
 
 .model-tab-wrap {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex: 0 0 auto;
+  cursor: grab;
 }
 
 .model-tab-wrap-error .model-tab {
   border-color: rgba(255, 107, 107, 0.26);
+}
+
+.model-tab-wrap-dragging {
+  opacity: 0.5;
+  transform: scale(0.98);
 }
 
 .model-header-actions {
@@ -659,6 +675,7 @@ textarea {
   cursor: pointer;
   transition: border-color 140ms ease, background 140ms ease, transform 140ms ease;
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .model-tab:hover {
