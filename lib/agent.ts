@@ -10,7 +10,42 @@ type SearchResult = {
 type RankedSearchResult = SearchResult & {
   matchCount: number;
   coverage: number;
+  headingPath: string[];
 };
+
+type QuestionIntent = {
+  kind: "overview" | "exact_value" | "rule";
+  answerMode: "summary" | "exact_value" | "rule";
+  entity: string | null;
+  environment: string | null;
+  targetField: string | null;
+  wantsConcreteUrl: boolean;
+};
+
+type ExtractedAnswer = {
+  value: string | null;
+  valueType: "full_url" | "domain_rule" | "text";
+  confidence: number;
+  rationale: string;
+};
+
+function extractUrls(text: string) {
+  return Array.from(text.matchAll(/https?:\/\/[^\s)\]]+/g)).map((match) => match[0]);
+}
+
+function urlMatchesTargetField(url: string, targetField: string | null) {
+  if (targetField === "homepage") {
+    return /#\/index(?:$|\?)/.test(url);
+  }
+  if (targetField === "order_detail") {
+    return /#\/orderDetail(?:$|\?)/i.test(url);
+  }
+  if (targetField === "grab_order") {
+    return /#\/grabOrderDetail(?:$|\?)/i.test(url);
+  }
+
+  return true;
+}
 
 type AgentToolName = "search_documents" | "lookup_channel" | "list_documents";
 
@@ -43,6 +78,10 @@ export type AgentPlanResult = {
   shouldAnswer: boolean;
   debug: {
     questionType: "overview" | "direct";
+    intentKind: QuestionIntent["kind"];
+    answerMode: QuestionIntent["answerMode"];
+    environment: string | null;
+    targetField: string | null;
     hitCount: number;
     strongHitCount: number;
     topScore: number | null;
@@ -96,15 +135,16 @@ function expandQueryTerms(question: string) {
   return Array.from(expanded);
 }
 
-function scoreChunk(question: string, chunk: string): RankedSearchResult["score"] | null {
+function scoreChunk(question: string, chunk: { text: string; searchText: string; headingPath: string[] }): RankedSearchResult["score"] | null {
   const queryTokens = expandQueryTerms(question);
   if (queryTokens.length === 0) {
     return null;
   }
 
-  const excerpt = chunk.trim();
+  const excerpt = chunk.text.trim();
   const excerptLower = excerpt.toLowerCase();
-  const chunkTokens = tokenize(excerpt);
+  const searchTextLower = chunk.searchText.toLowerCase();
+  const chunkTokens = tokenize(chunk.searchText);
   const chunkTokenSet = new Set(chunkTokens);
 
   let matchCount = 0;
@@ -112,7 +152,7 @@ function scoreChunk(question: string, chunk: string): RankedSearchResult["score"
 
   for (const token of queryTokens) {
     const exactWordMatch = chunkTokenSet.has(token);
-    const substringMatch = !exactWordMatch && token.length >= 2 && excerptLower.includes(token);
+    const substringMatch = !exactWordMatch && token.length >= 2 && searchTextLower.includes(token);
 
     if (!exactWordMatch && !substringMatch) {
       continue;
@@ -132,21 +172,31 @@ function scoreChunk(question: string, chunk: string): RankedSearchResult["score"
   }
 
   const coverage = matchCount / queryTokens.length;
-  const phraseBonus = excerptLower.includes(question.toLowerCase()) ? 4 : 0;
-  const headingBonus = /^(#{1,6}\s|\d+[.)、]|\-\s)/m.test(excerpt) ? 0.6 : 0;
+  const phraseBonus = searchTextLower.includes(question.toLowerCase()) ? 4 : 0;
+  const headingBonus =
+    chunk.headingPath.some((heading) => question.toLowerCase().includes(heading.toLowerCase())) ||
+    chunk.headingPath.some((heading) => heading.toLowerCase().includes(question.toLowerCase()))
+      ? 2
+      : /^(#{1,6}\s|\d+[.)、]|\-\s)/m.test(excerpt)
+        ? 0.6
+        : 0;
   const densityBonus = coverage >= 0.6 ? 1.8 : coverage >= 0.4 ? 0.8 : 0;
   const lengthPenalty = excerpt.length > 720 ? 1.2 : excerpt.length > 540 ? 0.6 : 0;
 
   return Number((weightedMatches + phraseBonus + headingBonus + densityBonus - lengthPenalty).toFixed(3));
 }
 
-function rankChunk(question: string, filename: string, chunk: string): RankedSearchResult | null {
+function rankChunk(
+  question: string,
+  filename: string,
+  chunk: { text: string; searchText: string; headingPath: string[] },
+): RankedSearchResult | null {
   const queryTokens = expandQueryTerms(question);
   if (queryTokens.length === 0) {
     return null;
   }
 
-  const excerptLower = chunk.toLowerCase();
+  const excerptLower = chunk.searchText.toLowerCase();
   let matchCount = 0;
 
   for (const token of queryTokens) {
@@ -163,9 +213,10 @@ function rankChunk(question: string, filename: string, chunk: string): RankedSea
   return {
     filename,
     score,
-    excerpt: chunk,
+    excerpt: chunk.text,
     matchCount,
     coverage: matchCount / queryTokens.length,
+    headingPath: chunk.headingPath,
   };
 }
 
@@ -196,6 +247,101 @@ function isOverviewQuestion(question: string) {
   return /多少|几个|有哪些|列出|总结|概括|统计|数量|全部|所有|分类|渠道/.test(question);
 }
 
+function isConcreteUrlQuestion(question: string) {
+  return /首页地址|具体地址|完整地址|完整链接|具体链接|url|URL|href|链接/.test(question);
+}
+
+function extractEnvironment(question: string) {
+  const normalized = question.toLowerCase();
+  if (/uat/.test(normalized)) {
+    return "uat";
+  }
+  if (/qa/.test(normalized)) {
+    return "qa";
+  }
+  if (/预发2|pre2|stage2/.test(question)) {
+    return "pre2";
+  }
+  if (/预发|预发1|stage/.test(question)) {
+    return "pre";
+  }
+  if (/正式|生产|线上|prod|production/.test(question)) {
+    return "prod";
+  }
+
+  return null;
+}
+
+function extractTargetField(question: string) {
+  if (/首页地址|首页链接|首页url|首页URL|首页/.test(question)) {
+    return "homepage";
+  }
+  if (/订单详情|orderdetail/i.test(question)) {
+    return "order_detail";
+  }
+  if (/抢票/.test(question)) {
+    return "grab_order";
+  }
+  if (/规则|域名|环境/.test(question)) {
+    return "rule";
+  }
+
+  return null;
+}
+
+function extractEntity(question: string) {
+  const idMatch = question.match(/\b\d{4,6}\b/);
+  if (idMatch) {
+    return idMatch[0];
+  }
+
+  const entityMatch = question.match(
+    /(港版支付宝|支付宝hk|alipayhk|hopegooAPP|hopegooPC|hopegooM站|hopegoo M站|微信国际站|octopus|wechatHK|aliPayCN)/i,
+  );
+
+  return entityMatch?.[0] ?? null;
+}
+
+function parseQuestionIntent(question: string): QuestionIntent {
+  const overview = isOverviewQuestion(question);
+  const wantsConcreteUrl = isConcreteUrlQuestion(question);
+  const targetField = extractTargetField(question);
+  const environment = extractEnvironment(question);
+  const entity = extractEntity(question);
+  const ruleQuestion = /规则|域名|环境/.test(question) && !wantsConcreteUrl;
+
+  if (overview) {
+    return {
+      kind: "overview",
+      answerMode: "summary",
+      entity,
+      environment,
+      targetField,
+      wantsConcreteUrl: false,
+    };
+  }
+
+  if (ruleQuestion) {
+    return {
+      kind: "rule",
+      answerMode: "rule",
+      entity,
+      environment,
+      targetField: targetField || "rule",
+      wantsConcreteUrl: false,
+    };
+  }
+
+  return {
+    kind: "exact_value",
+    answerMode: wantsConcreteUrl ? "exact_value" : targetField === "rule" ? "rule" : "exact_value",
+    entity,
+    environment,
+    targetField,
+    wantsConcreteUrl,
+  };
+}
+
 async function buildDocumentOverviewSources(documents: IndexedDocument[], limit = 8) {
   const results: SearchResult[] = [];
 
@@ -206,17 +352,22 @@ async function buildDocumentOverviewSources(documents: IndexedDocument[], limit 
         : await readMarkdownChunks(document.markdownPath);
 
     const priorityChunks = chunks.filter((chunk) =>
-      /渠道|环境|支付|站|app|pc|m站|微信|支付宝|hopegoo/i.test(chunk),
+      /渠道|环境|支付|站|app|pc|m站|微信|支付宝|hopegoo/i.test(chunk.searchText),
     );
     const selectedChunks = [...priorityChunks, ...chunks].filter(
-      (chunk, index, list) => list.indexOf(chunk) === index,
+      (chunk, index, list) =>
+        list.findIndex(
+          (candidate) =>
+            candidate.text === chunk.text &&
+            candidate.headingPath.join(" > ") === chunk.headingPath.join(" > "),
+        ) === index,
     );
 
     for (const [index, chunk] of selectedChunks.entries()) {
       results.push({
         filename: document.filename,
         score: 1,
-        excerpt: chunk,
+        excerpt: chunk.text,
       });
 
       if (index + 1 >= limit) {
@@ -226,6 +377,122 @@ async function buildDocumentOverviewSources(documents: IndexedDocument[], limit 
   }
 
   return results.slice(0, limit);
+}
+
+function rerankResultsForQuestion(intent: QuestionIntent, results: RankedSearchResult[]) {
+
+  return [...results].sort((a, b) => {
+    const scoreA = scoreResultForIntent(intent, a);
+    const scoreB = scoreResultForIntent(intent, b);
+
+    if (scoreB !== scoreA) {
+      return scoreB - scoreA;
+    }
+
+    if (b.score !== a.score) {
+      return b.score - a.score;
+    }
+
+    return a.excerpt.length - b.excerpt.length;
+  });
+}
+
+function scoreResultForIntent(intent: QuestionIntent, result: RankedSearchResult) {
+  let total = result.score;
+  const excerpt = result.excerpt.toLowerCase();
+
+  if (intent.entity && excerpt.includes(intent.entity.toLowerCase())) {
+    total += 1.4;
+  }
+
+  if (intent.environment) {
+    if (excerpt.includes(intent.environment)) {
+      total += 1.2;
+    } else if (/uat|qa|预发|生产|正式/.test(excerpt)) {
+      total -= 0.6;
+    }
+  }
+
+  if (intent.wantsConcreteUrl) {
+    if (/https?:\/\/|#\/index|href/.test(excerpt)) {
+      total += 3;
+    }
+
+    if (intent.targetField === "homepage" && /#\/index/.test(excerpt)) {
+      total += 2.5;
+    }
+
+    if (/正式环境|uat:|预发|生产/.test(excerpt) && !/https?:\/\/.+#\/index/.test(excerpt)) {
+      total -= 1.5;
+    }
+  } else if (intent.answerMode === "rule") {
+    if (/正式环境|uat:|预发|生产/.test(excerpt)) {
+      total += 2;
+    }
+
+    if (/https?:\/\/.+#\/index/.test(excerpt)) {
+      total -= 0.8;
+    }
+  }
+
+  return total;
+}
+
+function extractAnswerFromSources(intent: QuestionIntent, sources: SearchResult[]): ExtractedAnswer | null {
+  if (!sources.length) {
+    return null;
+  }
+
+  if (intent.wantsConcreteUrl) {
+    const normalizedEnvironment = intent.environment?.toLowerCase() || "";
+    const exactUrlSource = sources.find((source) => {
+      const excerpt = source.excerpt.toLowerCase();
+      return (
+        /https?:\/\/[^\s)\]]+/.test(excerpt) &&
+        (!normalizedEnvironment || excerpt.includes(normalizedEnvironment)) &&
+        extractUrls(source.excerpt).some((url) =>
+          urlMatchesTargetField(url, intent.targetField),
+        )
+      );
+    });
+
+    if (exactUrlSource) {
+      const matchedUrl = extractUrls(exactUrlSource.excerpt).find((url) =>
+        urlMatchesTargetField(url, intent.targetField),
+      );
+      if (matchedUrl) {
+        return {
+          value: matchedUrl,
+          valueType: "full_url",
+          confidence: 0.96,
+          rationale: "从命中片段中抽取到了与环境和字段匹配的完整 URL。",
+        };
+      }
+    }
+
+    const domainSource = sources.find((source) => {
+      const excerpt = source.excerpt.toLowerCase();
+      return Boolean(
+        normalizedEnvironment &&
+          excerpt.includes(normalizedEnvironment) &&
+          /www\.[a-z0-9.-]+\.[a-z]{2,}/.test(excerpt),
+      );
+    });
+
+    if (domainSource) {
+      const domainMatch = domainSource.excerpt.match(/www\.[a-z0-9.-]+\.[a-z]{2,}/i);
+      if (domainMatch) {
+        return {
+          value: domainMatch[0],
+          valueType: "domain_rule",
+          confidence: 0.58,
+          rationale: "只抽取到了环境域名规则，没有抽取到完整路径。",
+        };
+      }
+    }
+  }
+
+  return null;
 }
 
 async function searchDocuments(query: string, limit = 4) {
@@ -311,7 +578,12 @@ export async function executeFastDocumentPlan(
     throw new Error("当前选中的文档不存在，请重新选择。");
   }
 
-  const rankedResults = await rankDocumentsInScope(scopedDocuments, question);
+  const intent = parseQuestionIntent(question);
+
+  const rankedResults = rerankResultsForQuestion(
+    intent,
+    await rankDocumentsInScope(scopedDocuments, question),
+  );
   const strongResults = rankedResults.filter((result) => isStrongEvidence(result));
   let sources = (strongResults.length ? strongResults : rankedResults)
     .slice(0, 5)
@@ -325,16 +597,16 @@ export async function executeFastDocumentPlan(
 
   const hasStrongDirectEvidence = strongResults.length > 0;
   const shouldAnswer =
-    sources.length > 0 && (hasStrongDirectEvidence || isOverviewQuestion(question));
+    sources.length > 0 && (hasStrongDirectEvidence || intent.kind === "overview");
 
-  if (!shouldAnswer && !isOverviewQuestion(question)) {
+  if (!shouldAnswer && intent.kind !== "overview") {
     steps.push({
       tool: "search_documents",
       summary: "当前命中证据较弱，后续回答会更保守，必要时明确说明无法确认",
     });
   }
 
-  if ((sources.length === 0 || !hasStrongDirectEvidence) && isOverviewQuestion(question)) {
+  if ((sources.length === 0 || !hasStrongDirectEvidence) && intent.kind === "overview") {
     const overviewSources = await buildDocumentOverviewSources(scopedDocuments, 8);
 
     if (overviewSources.length) {
@@ -356,9 +628,13 @@ export async function executeFastDocumentPlan(
   return {
     sources,
     steps,
-    shouldAnswer: sources.length > 0 && (shouldAnswer || isOverviewQuestion(question)),
+    shouldAnswer: sources.length > 0 && (shouldAnswer || intent.kind === "overview"),
     debug: {
-      questionType: isOverviewQuestion(question) ? "overview" : "direct",
+      questionType: intent.kind === "overview" ? "overview" : "direct",
+      intentKind: intent.kind,
+      answerMode: intent.answerMode,
+      environment: intent.environment,
+      targetField: intent.targetField,
       hitCount: rankedResults.length,
       strongHitCount: strongResults.length,
       topScore: rankedResults[0]?.score ?? null,
@@ -483,11 +759,18 @@ async function callModel(messages: Array<{ role: "system" | "user" | "assistant"
 }
 
 function buildFinalAnswerMessages(question: string, sources: SearchResult[]) {
+  const intent = parseQuestionIntent(question);
+  const concreteUrlInstruction = intent.wantsConcreteUrl
+    ? "如果问题在问首页地址、完整链接、href 或具体路径，优先返回文档里出现的完整 URL；只有文档没有完整 URL 时，才说明只有域名/规则，不能擅自补路径。"
+    : intent.answerMode === "rule"
+      ? "如果问题在问规则、域名或环境映射，优先总结规则本身，不要把域名规则误答成具体页面地址。"
+      : "如果问题在问具体值，优先返回文档里最直接、最完整的那一条，不要用泛规则替代具体结果。";
+
   return [
     {
       role: "system" as const,
       content:
-        "你是一个文档问答助手。基于给定工具结果回答，先给结论，再给简短依据。遇到统计、数量、列举、总结类问题，要从证据里归纳、去重并计数；如果证据不足，要明确说明口径和不确定性，不要编造。",
+        `你是一个文档问答助手。基于给定工具结果回答，先给结论，再给简短依据。遇到统计、数量、列举、总结类问题，要从证据里归纳、去重并计数；如果证据不足，要明确说明口径和不确定性，不要编造。${concreteUrlInstruction}`,
     },
     {
       role: "user" as const,
@@ -498,6 +781,23 @@ function buildFinalAnswerMessages(question: string, sources: SearchResult[]) {
       )}`,
     },
   ];
+}
+
+function buildFallbackDebug(question: string, hitCount: number, topSourceFilename: string | null) {
+  const intent = parseQuestionIntent(question);
+
+  return {
+    questionType: intent.kind === "overview" ? "overview" : "direct",
+    intentKind: intent.kind,
+    answerMode: intent.answerMode,
+    environment: intent.environment,
+    targetField: intent.targetField,
+    hitCount,
+    strongHitCount: hitCount,
+    topScore: null,
+    topSourceFilename,
+    refusalReason: hitCount > 0 ? null : "no_hits",
+  } satisfies AgentPlanResult["debug"];
 }
 
 export async function executeAgentPlan(
@@ -559,14 +859,11 @@ export async function executeAgentPlan(
         sources: Array.from(collectedSources.values()).slice(0, 4),
         steps,
         shouldAnswer: collectedSources.size > 0,
-        debug: {
-          questionType: isOverviewQuestion(question) ? "overview" : "direct",
-          hitCount: collectedSources.size,
-          strongHitCount: collectedSources.size,
-          topScore: null,
-          topSourceFilename: Array.from(collectedSources.values())[0]?.filename ?? null,
-          refusalReason: collectedSources.size > 0 ? null : "no_hits",
-        },
+        debug: buildFallbackDebug(
+          question,
+          collectedSources.size,
+          Array.from(collectedSources.values())[0]?.filename ?? null,
+        ),
       };
     }
 
@@ -626,14 +923,7 @@ export async function executeAgentPlan(
       sources: [],
       steps,
       shouldAnswer: false,
-      debug: {
-        questionType: isOverviewQuestion(question) ? "overview" : "direct",
-        hitCount: 0,
-        strongHitCount: 0,
-        topScore: null,
-        topSourceFilename: null,
-        refusalReason: "no_hits",
-      },
+      debug: buildFallbackDebug(question, 0, null),
     };
   }
 
@@ -641,14 +931,11 @@ export async function executeAgentPlan(
     sources: Array.from(collectedSources.values()).slice(0, 4),
     steps,
     shouldAnswer: true,
-    debug: {
-      questionType: isOverviewQuestion(question) ? "overview" : "direct",
-      hitCount: collectedSources.size,
-      strongHitCount: collectedSources.size,
-      topScore: null,
-      topSourceFilename: Array.from(collectedSources.values())[0]?.filename ?? null,
-      refusalReason: null,
-    },
+    debug: buildFallbackDebug(
+      question,
+      collectedSources.size,
+      Array.from(collectedSources.values())[0]?.filename ?? null,
+    ),
   };
 }
 
@@ -657,6 +944,21 @@ export async function streamFinalAnswer(
   sources: SearchResult[],
   onDelta: (chunk: string) => void,
 ) {
+  const intent = parseQuestionIntent(question);
+  const extracted = extractAnswerFromSources(intent, sources);
+
+  if (intent.wantsConcreteUrl && extracted?.valueType === "full_url" && extracted.value) {
+    const answer = `结论：${extracted.value}\n依据：命中片段里给出了 ${intent.environment || ""} 环境的完整首页链接。`;
+    onDelta(answer);
+    return answer;
+  }
+
+  if (intent.wantsConcreteUrl && extracted?.valueType === "domain_rule" && extracted.value) {
+    const answer = `结论：文档里当前只明确给出了域名规则 ${extracted.value}，没有足够证据确认完整首页路径。\n依据：命中片段展示的是环境域名映射，而不是完整 URL。`;
+    onDelta(answer);
+    return answer;
+  }
+
   const client = getOpenAIClient();
   const stream = await client.chat.completions.create({
     model: getModelName(),
@@ -682,6 +984,17 @@ export async function streamFinalAnswer(
 }
 
 export async function generateFinalAnswer(question: string, sources: SearchResult[]) {
+  const intent = parseQuestionIntent(question);
+  const extracted = extractAnswerFromSources(intent, sources);
+
+  if (intent.wantsConcreteUrl && extracted?.valueType === "full_url" && extracted.value) {
+    return `结论：${extracted.value}\n依据：命中片段里给出了 ${intent.environment || ""} 环境的完整首页链接。`;
+  }
+
+  if (intent.wantsConcreteUrl && extracted?.valueType === "domain_rule" && extracted.value) {
+    return `结论：文档里当前只明确给出了域名规则 ${extracted.value}，没有足够证据确认完整首页路径。\n依据：命中片段展示的是环境域名映射，而不是完整 URL。`;
+  }
+
   const finalAnswer = await callModel([
     ...buildFinalAnswerMessages(question, sources),
   ]);

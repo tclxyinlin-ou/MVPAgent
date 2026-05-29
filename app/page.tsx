@@ -48,6 +48,10 @@ type AskResponse = {
   }>;
   debug?: {
     questionType: "overview" | "direct";
+    intentKind: "overview" | "exact_value" | "rule";
+    answerMode: "summary" | "exact_value" | "rule";
+    environment: string | null;
+    targetField: string | null;
     hitCount: number;
     strongHitCount: number;
     topScore: number | null;
@@ -141,6 +145,34 @@ function formatRefusalReason(reason: string | null | undefined) {
   }
 
   return reason;
+}
+
+function formatIntentKind(kind: string | null | undefined) {
+  if (kind === "overview") {
+    return "统计/概括";
+  }
+  if (kind === "rule") {
+    return "规则查询";
+  }
+  if (kind === "exact_value") {
+    return "具体值查询";
+  }
+
+  return "未知";
+}
+
+function formatAnswerMode(mode: string | null | undefined) {
+  if (mode === "summary") {
+    return "汇总回答";
+  }
+  if (mode === "rule") {
+    return "规则回答";
+  }
+  if (mode === "exact_value") {
+    return "精确值回答";
+  }
+
+  return "未知";
 }
 
 export default function HomePage() {
@@ -1450,8 +1482,24 @@ export default function HomePage() {
                   {debugInfo ? (
                     <div className="debug-grid">
                       <div className="debug-card">
+                        <span className="muted tiny">意图类型</span>
+                        <strong>{formatIntentKind(debugInfo.intentKind)}</strong>
+                      </div>
+                      <div className="debug-card">
+                        <span className="muted tiny">回答模式</span>
+                        <strong>{formatAnswerMode(debugInfo.answerMode)}</strong>
+                      </div>
+                      <div className="debug-card">
                         <span className="muted tiny">问题类型</span>
                         <strong>{debugInfo.questionType === "overview" ? "统计/概括" : "直接问答"}</strong>
+                      </div>
+                      <div className="debug-card">
+                        <span className="muted tiny">环境</span>
+                        <strong>{debugInfo.environment || "未识别"}</strong>
+                      </div>
+                      <div className="debug-card">
+                        <span className="muted tiny">目标字段</span>
+                        <strong>{debugInfo.targetField || "未识别"}</strong>
                       </div>
                       <div className="debug-card">
                         <span className="muted tiny">总命中数</span>

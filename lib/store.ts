@@ -1,6 +1,6 @@
 import { access, mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
-import { chunkText } from "@/lib/openai";
+import { chunkTextWithHeadings, type DocumentChunk } from "@/lib/openai";
 
 export type IndexedDocument = {
   id: string;
@@ -12,7 +12,7 @@ export type IndexedDocument = {
   markdownPath: string;
   richTextPath: string;
   chunkCount: number;
-  chunks?: string[];
+  chunks?: DocumentChunk[];
   updatedAt?: string;
 };
 
@@ -44,8 +44,24 @@ function normalizeStoredText(text: string) {
     .trim();
 }
 
+function normalizeChunk(chunk: string | DocumentChunk): DocumentChunk {
+  if (typeof chunk === "string") {
+    return {
+      text: chunk,
+      headingPath: [],
+      searchText: chunk,
+    };
+  }
+
+  return {
+    text: chunk.text,
+    headingPath: Array.isArray(chunk.headingPath) ? chunk.headingPath : [],
+    searchText: chunk.searchText || `${chunk.headingPath?.join(" > ") || ""}\n${chunk.text}`.trim(),
+  };
+}
+
 function chunkStoredText(text: string) {
-  return chunkText(text);
+  return chunkTextWithHeadings(text);
 }
 
 async function ensureDataDir() {
@@ -64,8 +80,11 @@ async function fileExists(targetPath: string) {
   }
 }
 
-function normalizeLegacyMarkdown(filename: string, chunks: string[]) {
-  const content = chunks.join("\n\n").trim();
+function normalizeLegacyMarkdown(filename: string, chunks: Array<string | DocumentChunk>) {
+  const content = chunks
+    .map((chunk) => (typeof chunk === "string" ? chunk : chunk.text))
+    .join("\n\n")
+    .trim();
   return `# ${filename}\n\n${content}\n`;
 }
 
@@ -85,8 +104,8 @@ async function migrateLegacyDocument(document: LegacyIndexedDocument) {
 
   try {
     const raw = await readFile(document.textPath, "utf8");
-    const parsed = JSON.parse(raw) as { chunks?: string[] };
-    const chunks = Array.isArray(parsed.chunks) ? parsed.chunks : [];
+    const parsed = JSON.parse(raw) as { chunks?: Array<string | DocumentChunk> };
+    const chunks = Array.isArray(parsed.chunks) ? parsed.chunks.map(normalizeChunk) : [];
     const markdownPath = path.join(
       MARKDOWN_DIR,
       `${document.id.replace(/[^a-zA-Z0-9._-\u4e00-\u9fa5]/g, "_")}.md`,
@@ -112,6 +131,7 @@ async function migrateLegacyDocument(document: LegacyIndexedDocument) {
       markdownPath,
       richTextPath,
       chunkCount: chunks.length || document.chunkCount,
+      chunks,
     } satisfies IndexedDocument;
   } catch {
     return null;
@@ -139,6 +159,21 @@ export async function readState(): Promise<AppState> {
           nextDocument.chunks = chunkStoredText(markdown);
           nextDocument.chunkCount = nextDocument.chunks.length;
           shouldRewriteState = true;
+        } else if (Array.isArray(nextDocument.chunks)) {
+          const normalizedChunks = nextDocument.chunks.map(normalizeChunk);
+          const needsUpgrade = normalizedChunks.some(
+            (chunk) => chunk.headingPath.length === 0 && /^#{1,6}\s/m.test(chunk.text),
+          );
+
+          if (needsUpgrade && (await fileExists(nextDocument.markdownPath))) {
+            const markdown = normalizeStoredText(await readFile(nextDocument.markdownPath, "utf8"));
+            nextDocument.chunks = chunkStoredText(markdown);
+            nextDocument.chunkCount = nextDocument.chunks.length;
+            shouldRewriteState = true;
+          } else {
+            nextDocument.chunks = normalizedChunks;
+            nextDocument.chunkCount = normalizedChunks.length;
+          }
         }
 
         migratedDocuments.push(nextDocument);

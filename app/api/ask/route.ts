@@ -104,6 +104,10 @@ export async function POST(request: NextRequest) {
               type: "debug",
               debug: cached.debug || {
                 questionType: "direct",
+                intentKind: "exact_value",
+                answerMode: "exact_value",
+                environment: null,
+                targetField: null,
                 hitCount: cached.sources.length,
                 strongHitCount: cached.sources.length,
                 topScore: cached.sources[0]?.score ?? null,

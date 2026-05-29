@@ -16,6 +16,12 @@ import { marked } from "marked";
 
 const execFileAsync = promisify(execFile);
 
+export type DocumentChunk = {
+  text: string;
+  headingPath: string[];
+  searchText: string;
+};
+
 function requireApiKey() {
   if (!getActiveModelProfileSync().authToken) {
     throw new Error("缺少模型密钥。请先在 .env 或模型设置里配置。");
@@ -146,25 +152,72 @@ function docxXmlToMarkdown(documentXml: string, stylesXml: string) {
 const DEFAULT_CHUNK_SIZE = 420;
 const DEFAULT_CHUNK_OVERLAP = 80;
 
-function splitIntoChunkUnits(text: string) {
-  const normalized = normalizeText(text);
+type ChunkUnit = {
+  text: string;
+  headingPath: string[];
+};
 
-  return normalized
-    .split(/\n{2,}/)
-    .map((block) => block.trim())
-    .filter(Boolean)
-    .flatMap((block) => {
-      if (block.length <= DEFAULT_CHUNK_SIZE) {
-        return [block];
+function splitIntoChunkUnits(text: string): ChunkUnit[] {
+  const normalized = normalizeText(text);
+  const lines = normalized.split("\n");
+  const headingStack: Array<{ level: number; text: string }> = [];
+  const blocks: ChunkUnit[] = [];
+  let currentLines: string[] = [];
+  let currentHeadingPath: string[] = [];
+
+  const flushBlock = () => {
+    const blockText = normalizeText(currentLines.join("\n"));
+    if (!blockText) {
+      currentLines = [];
+      return;
+    }
+
+    blocks.push({
+      text: blockText,
+      headingPath: [...currentHeadingPath],
+    });
+    currentLines = [];
+  };
+
+  for (const line of lines) {
+    const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+
+    if (headingMatch) {
+      flushBlock();
+      const level = headingMatch[1].length;
+      const text = headingMatch[2].trim();
+
+      while (headingStack.length && headingStack[headingStack.length - 1].level >= level) {
+        headingStack.pop();
       }
 
-      const sentences = block
+      headingStack.push({ level, text });
+      currentHeadingPath = headingStack.map((item) => item.text);
+      currentLines = [line];
+      continue;
+    }
+
+    currentLines.push(line);
+  }
+
+  flushBlock();
+
+  return blocks.flatMap((block) => {
+    if (block.text.length <= DEFAULT_CHUNK_SIZE) {
+      return [block];
+    }
+
+    const sentences = block.text
         .split(/(?<=[。！？!?；;]|[.](?=\s)|\n)/)
         .map((part) => part.trim())
         .filter(Boolean);
 
-      return sentences.length ? sentences : [block];
-    });
+    const units = sentences.length ? sentences : [block.text];
+    return units.map((text) => ({
+      text,
+      headingPath: block.headingPath,
+    }));
+  });
 }
 
 export function chunkText(
@@ -185,11 +238,11 @@ export function chunkText(
 
   for (const unit of units) {
     if (!current) {
-      current = unit;
+      current = unit.text;
       continue;
     }
 
-    const candidate = `${current}\n\n${unit}`;
+    const candidate = `${current}\n\n${unit.text}`;
     if (candidate.length <= chunkSize) {
       current = candidate;
       continue;
@@ -198,7 +251,7 @@ export function chunkText(
     pushChunk(current);
 
     const tail = overlap > 0 ? current.slice(-overlap).trim() : "";
-    current = tail ? `${tail}\n\n${unit}` : unit;
+    current = tail ? `${tail}\n\n${unit.text}` : unit.text;
 
     while (current.length > chunkSize) {
       pushChunk(current.slice(0, chunkSize));
@@ -212,6 +265,74 @@ export function chunkText(
   pushChunk(current);
 
   return chunks.filter((chunk, index) => chunks.indexOf(chunk) === index);
+}
+
+export function chunkTextWithHeadings(
+  text: string,
+  chunkSize = DEFAULT_CHUNK_SIZE,
+  overlap = DEFAULT_CHUNK_OVERLAP,
+): DocumentChunk[] {
+  const units = splitIntoChunkUnits(text);
+  const chunks: DocumentChunk[] = [];
+  let currentText = "";
+  let currentHeadingPath: string[] = [];
+
+  const pushChunk = (value: string, headingPath: string[]) => {
+    const textValue = normalizeText(value);
+    if (!textValue) {
+      return;
+    }
+
+    const headingText = headingPath.join(" > ").trim();
+    const searchText = normalizeText(`${headingText}\n${textValue}`);
+    chunks.push({
+      text: textValue,
+      headingPath: [...headingPath],
+      searchText,
+    });
+  };
+
+  for (const unit of units) {
+    if (!currentText) {
+      currentText = unit.text;
+      currentHeadingPath = unit.headingPath;
+      continue;
+    }
+
+    const sameHeadingPath =
+      currentHeadingPath.join(" > ") === unit.headingPath.join(" > ");
+    const candidate = `${currentText}\n\n${unit.text}`;
+
+    if (sameHeadingPath && candidate.length <= chunkSize) {
+      currentText = candidate;
+      continue;
+    }
+
+    pushChunk(currentText, currentHeadingPath);
+
+    const tail = overlap > 0 ? currentText.slice(-overlap).trim() : "";
+    currentText = tail ? `${tail}\n\n${unit.text}` : unit.text;
+    currentHeadingPath = unit.headingPath;
+
+    while (currentText.length > chunkSize) {
+      pushChunk(currentText.slice(0, chunkSize), currentHeadingPath);
+      currentText =
+        overlap > 0
+          ? currentText.slice(Math.max(chunkSize - overlap, 1)).trim()
+          : currentText.slice(chunkSize).trim();
+    }
+  }
+
+  pushChunk(currentText, currentHeadingPath);
+
+  return chunks.filter(
+    (chunk, index) =>
+      chunks.findIndex(
+        (candidate) =>
+          candidate.text === chunk.text &&
+          candidate.headingPath.join(" > ") === chunk.headingPath.join(" > "),
+      ) === index,
+  );
 }
 
 async function extractTextFromDocument(filePath: string) {
@@ -259,7 +380,7 @@ function toMarkdownDocument(filename: string, text: string) {
 
 export async function readMarkdownChunks(markdownPath: string) {
   const markdown = normalizeText(await readFile(markdownPath, "utf8"));
-  return chunkText(markdown);
+  return chunkTextWithHeadings(markdown);
 }
 
 export async function indexDocumentLocally({
@@ -294,7 +415,7 @@ export async function indexDocumentLocally({
   const markdownContent = toMarkdownDocument(filename, extractedText);
   await writeFile(markdownPath, markdownContent, "utf8");
   await writeFile(richTextPath, await marked.parse(markdownContent), "utf8");
-  const chunks = chunkText(normalizeText(markdownContent));
+  const chunks = chunkTextWithHeadings(normalizeText(markdownContent));
 
   const nextDocument: IndexedDocument = {
     id: `${timestamp}:${safeFilename}`,

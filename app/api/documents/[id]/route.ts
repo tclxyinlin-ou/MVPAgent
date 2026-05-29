@@ -1,6 +1,6 @@
 import { readFile, unlink, writeFile } from "fs/promises";
 import { NextRequest, NextResponse } from "next/server";
-import { chunkText, normalizeText } from "@/lib/openai";
+import { chunkTextWithHeadings, normalizeText } from "@/lib/openai";
 import { readState, writeState } from "@/lib/store";
 import { marked } from "marked";
 import TurndownService from "turndown";
@@ -96,7 +96,7 @@ export async function PUT(
     "utf8",
   );
 
-  const nextChunks = chunkText(normalized);
+  const nextChunks = chunkTextWithHeadings(normalized);
   const nextChunkCount = nextChunks.length;
   target.state.documents[target.index] = {
     ...target.document,
