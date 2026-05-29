@@ -1,0 +1,43 @@
+app/api/ask/route.ts
+  s_6dae06dbff369d::t_ab814ad2f607ad 149
+  s_6dae06dbff369d::t_8bf6efd46c0f66 152-153
+  s_6dae06dbff369d::t_30dbe9d6209870 22-29,103-113,133-135,195
+  s_6dae06dbff369d::t_bef20841d02217 150-151
+app/page.tsx
+  s_6dae06dbff369d::t_db7a386e8702f0 49-56,72-75,130-145,165
+  s_6dae06dbff369d::t_9b4919b6fb6a34 1443-1491
+  s_6dae06dbff369d::t_15aa06a59bf90b 1322-1335
+  s_6dae06dbff369d::t_c8fac7e68cbc2b 821,902-903
+lib/store.ts
+  s_6dae06dbff369d::t_a0c9c14bfd1c81 3,47-48
+lib/agent.ts
+  s_6dae06dbff369d::t_e72da055cf2ef3 43,327-328,330,359
+  s_6dae06dbff369d::t_a0c9c14bfd1c81 10-14,62-150,153-154,158-171,173-178,182-186,241-266,322,329,331-337,696-697
+  s_6dae06dbff369d::t_409a7f76652b65 561,628,643
+  s_6dae06dbff369d::t_f1003f823300f4 326
+  s_6dae06dbff369d::t_dce15b07937436 179
+  s_6dae06dbff369d::t_b89ff00152370c 44-51,268-271,279-281,286-294,314-318,349-355,360-367,562-569,629-636,644-651
+  s_6dae06dbff369d::t_c4676c1dfae196 172
+  s_6dae06dbff369d::t_e52ca58b5b6d4c 187-192,267
+app/globals.css
+  s_6dae06dbff369d::t_bf79de50d23668 983-1019
+  s_6dae06dbff369d::t_380084878a3295 913-925
+lib/openai.ts
+  s_6dae06dbff369d::t_a0c9c14bfd1c81 146-175,177,179-189,192-195,198-209,212-214
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.5.2",
+  "base_commit_sha": "d80d88b3de0b878c45c112d865b737a096ad7ec6",
+  "prompts": {},
+  "sessions": {
+    "s_6dae06dbff369d": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019e634f-68d2-73f2-803d-eebdd58c9628",
+        "model": "gpt-5.4"
+      },
+      "human_author": "ouyinlin <suyu15008507430@163.com>"
+    }
+  }
+}
