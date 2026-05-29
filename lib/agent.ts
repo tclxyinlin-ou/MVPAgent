@@ -7,6 +7,11 @@ type SearchResult = {
   excerpt: string;
 };
 
+type RankedSearchResult = SearchResult & {
+  matchCount: number;
+  coverage: number;
+};
+
 type AgentToolName = "search_documents" | "lookup_channel" | "list_documents";
 
 type AgentAction =
@@ -35,6 +40,15 @@ export type AgentPlanResult = {
     tool: AgentToolName;
     summary: string;
   }>;
+  shouldAnswer: boolean;
+  debug: {
+    questionType: "overview" | "direct";
+    hitCount: number;
+    strongHitCount: number;
+    topScore: number | null;
+    topSourceFilename: string | null;
+    refusalReason: string | null;
+  };
 };
 
 function tokenize(text: string) {
@@ -45,19 +59,137 @@ function tokenize(text: string) {
     .filter(Boolean);
 }
 
-function scoreChunk(question: string, chunk: string) {
-  const queryTokens = tokenize(question);
-  const chunkTokens = new Set(tokenize(chunk));
+function dedupeTokens(tokens: string[]) {
+  return Array.from(new Set(tokens));
+}
 
-  let matches = 0;
-  for (const token of queryTokens) {
-    if (chunkTokens.has(token)) {
-      matches += 1;
+function hasCjk(text: string) {
+  return /[\u4e00-\u9fa5]/.test(text);
+}
+
+function expandQueryTerms(question: string) {
+  const baseTokens = dedupeTokens(tokenize(question)).filter((token) => token.length > 1 || hasCjk(token));
+  const expanded = new Set(baseTokens);
+
+  for (const token of baseTokens) {
+    if (/uat/i.test(token)) {
+      expanded.add("test");
+      expanded.add("测试");
+    }
+    if (/prod|production/i.test(token)) {
+      expanded.add("正式");
+      expanded.add("生产");
+    }
+    if (/app/i.test(token)) {
+      expanded.add("应用");
+    }
+    if (/pc/i.test(token)) {
+      expanded.add("web");
+      expanded.add("官网");
+    }
+    if (/h5|m站/i.test(token)) {
+      expanded.add("移动");
+      expanded.add("手机");
     }
   }
 
-  const phraseBonus = chunk.toLowerCase().includes(question.toLowerCase()) ? 3 : 0;
-  return matches + phraseBonus;
+  return Array.from(expanded);
+}
+
+function scoreChunk(question: string, chunk: string): RankedSearchResult["score"] | null {
+  const queryTokens = expandQueryTerms(question);
+  if (queryTokens.length === 0) {
+    return null;
+  }
+
+  const excerpt = chunk.trim();
+  const excerptLower = excerpt.toLowerCase();
+  const chunkTokens = tokenize(excerpt);
+  const chunkTokenSet = new Set(chunkTokens);
+
+  let matchCount = 0;
+  let weightedMatches = 0;
+
+  for (const token of queryTokens) {
+    const exactWordMatch = chunkTokenSet.has(token);
+    const substringMatch = !exactWordMatch && token.length >= 2 && excerptLower.includes(token);
+
+    if (!exactWordMatch && !substringMatch) {
+      continue;
+    }
+
+    matchCount += 1;
+
+    if (exactWordMatch) {
+      weightedMatches += token.length >= 4 || hasCjk(token) ? 2.2 : 1.4;
+    } else {
+      weightedMatches += hasCjk(token) ? 1.2 : 0.8;
+    }
+  }
+
+  if (matchCount === 0) {
+    return null;
+  }
+
+  const coverage = matchCount / queryTokens.length;
+  const phraseBonus = excerptLower.includes(question.toLowerCase()) ? 4 : 0;
+  const headingBonus = /^(#{1,6}\s|\d+[.)、]|\-\s)/m.test(excerpt) ? 0.6 : 0;
+  const densityBonus = coverage >= 0.6 ? 1.8 : coverage >= 0.4 ? 0.8 : 0;
+  const lengthPenalty = excerpt.length > 720 ? 1.2 : excerpt.length > 540 ? 0.6 : 0;
+
+  return Number((weightedMatches + phraseBonus + headingBonus + densityBonus - lengthPenalty).toFixed(3));
+}
+
+function rankChunk(question: string, filename: string, chunk: string): RankedSearchResult | null {
+  const queryTokens = expandQueryTerms(question);
+  if (queryTokens.length === 0) {
+    return null;
+  }
+
+  const excerptLower = chunk.toLowerCase();
+  let matchCount = 0;
+
+  for (const token of queryTokens) {
+    if (excerptLower.includes(token.toLowerCase())) {
+      matchCount += 1;
+    }
+  }
+
+  const score = scoreChunk(question, chunk);
+  if (score === null) {
+    return null;
+  }
+
+  return {
+    filename,
+    score,
+    excerpt: chunk,
+    matchCount,
+    coverage: matchCount / queryTokens.length,
+  };
+}
+
+export function isStrongEvidence(result: RankedSearchResult | SearchResult | undefined) {
+  if (!result) {
+    return false;
+  }
+
+  const coverage = "coverage" in result ? result.coverage : 0;
+  const matchCount = "matchCount" in result ? result.matchCount : 0;
+  return result.score >= 2.2 && (coverage >= 0.25 || matchCount >= 1);
+}
+
+function filterStrongEvidence(results: RankedSearchResult[], limit: number) {
+  const strong = results.filter((result) => isStrongEvidence(result));
+  return (strong.length ? strong : results).slice(0, limit);
+}
+
+function toSearchResult(result: RankedSearchResult): SearchResult {
+  return {
+    filename: result.filename,
+    score: result.score,
+    excerpt: result.excerpt,
+  };
 }
 
 function isOverviewQuestion(question: string) {
@@ -106,7 +238,7 @@ async function searchDocumentsInScope(
   query: string,
   limit = 4,
 ) {
-  const results: SearchResult[] = [];
+  const results: RankedSearchResult[] = [];
 
   for (const document of documents) {
     const chunks =
@@ -114,18 +246,52 @@ async function searchDocumentsInScope(
         ? document.chunks
         : await readMarkdownChunks(document.markdownPath);
     for (const chunk of chunks) {
-      const score = scoreChunk(query, chunk);
-      if (score > 0) {
-        results.push({
-          filename: document.filename,
-          score,
-          excerpt: chunk,
-        });
+      const ranked = rankChunk(query, document.filename, chunk);
+      if (ranked) {
+        results.push(ranked);
       }
     }
   }
 
-  return results.sort((a, b) => b.score - a.score).slice(0, limit);
+  return filterStrongEvidence(
+    results.sort((a, b) => {
+      if (b.score !== a.score) {
+        return b.score - a.score;
+      }
+      if (b.coverage !== a.coverage) {
+        return b.coverage - a.coverage;
+      }
+      return a.excerpt.length - b.excerpt.length;
+    }),
+    limit,
+  ).map(toSearchResult);
+}
+
+async function rankDocumentsInScope(documents: IndexedDocument[], query: string) {
+  const results: RankedSearchResult[] = [];
+
+  for (const document of documents) {
+    const chunks =
+      Array.isArray(document.chunks) && document.chunks.length
+        ? document.chunks
+        : await readMarkdownChunks(document.markdownPath);
+    for (const chunk of chunks) {
+      const ranked = rankChunk(query, document.filename, chunk);
+      if (ranked) {
+        results.push(ranked);
+      }
+    }
+  }
+
+  return results.sort((a, b) => {
+    if (b.score !== a.score) {
+      return b.score - a.score;
+    }
+    if (b.coverage !== a.coverage) {
+      return b.coverage - a.coverage;
+    }
+    return a.excerpt.length - b.excerpt.length;
+  });
 }
 
 export async function executeFastDocumentPlan(
@@ -145,15 +311,30 @@ export async function executeFastDocumentPlan(
     throw new Error("当前选中的文档不存在，请重新选择。");
   }
 
-  let sources = await searchDocumentsInScope(scopedDocuments, question, 5);
+  const rankedResults = await rankDocumentsInScope(scopedDocuments, question);
+  const strongResults = rankedResults.filter((result) => isStrongEvidence(result));
+  let sources = (strongResults.length ? strongResults : rankedResults)
+    .slice(0, 5)
+    .map(toSearchResult);
   const steps: AgentPlanResult["steps"] = [
     {
       tool: "search_documents",
-      summary: `快速检索当前文档，命中 ${sources.length} 条结果`,
+      summary: `快速检索当前文档，筛出 ${sources.length} 条高相关结果`,
     },
   ];
 
-  if (sources.length === 0 || isOverviewQuestion(question)) {
+  const hasStrongDirectEvidence = strongResults.length > 0;
+  const shouldAnswer =
+    sources.length > 0 && (hasStrongDirectEvidence || isOverviewQuestion(question));
+
+  if (!shouldAnswer && !isOverviewQuestion(question)) {
+    steps.push({
+      tool: "search_documents",
+      summary: "当前命中证据较弱，后续回答会更保守，必要时明确说明无法确认",
+    });
+  }
+
+  if ((sources.length === 0 || !hasStrongDirectEvidence) && isOverviewQuestion(question)) {
     const overviewSources = await buildDocumentOverviewSources(scopedDocuments, 8);
 
     if (overviewSources.length) {
@@ -165,9 +346,25 @@ export async function executeFastDocumentPlan(
     }
   }
 
+  const refusalReason =
+    sources.length === 0
+      ? "no_hits"
+      : shouldAnswer
+        ? null
+        : "top_hit_below_threshold";
+
   return {
     sources,
     steps,
+    shouldAnswer: sources.length > 0 && (shouldAnswer || isOverviewQuestion(question)),
+    debug: {
+      questionType: isOverviewQuestion(question) ? "overview" : "direct",
+      hitCount: rankedResults.length,
+      strongHitCount: strongResults.length,
+      topScore: rankedResults[0]?.score ?? null,
+      topSourceFilename: rankedResults[0]?.filename ?? null,
+      refusalReason,
+    },
   };
 }
 
@@ -361,6 +558,15 @@ export async function executeAgentPlan(
       return {
         sources: Array.from(collectedSources.values()).slice(0, 4),
         steps,
+        shouldAnswer: collectedSources.size > 0,
+        debug: {
+          questionType: isOverviewQuestion(question) ? "overview" : "direct",
+          hitCount: collectedSources.size,
+          strongHitCount: collectedSources.size,
+          topScore: null,
+          topSourceFilename: Array.from(collectedSources.values())[0]?.filename ?? null,
+          refusalReason: collectedSources.size > 0 ? null : "no_hits",
+        },
       };
     }
 
@@ -419,12 +625,30 @@ export async function executeAgentPlan(
     return {
       sources: [],
       steps,
+      shouldAnswer: false,
+      debug: {
+        questionType: isOverviewQuestion(question) ? "overview" : "direct",
+        hitCount: 0,
+        strongHitCount: 0,
+        topScore: null,
+        topSourceFilename: null,
+        refusalReason: "no_hits",
+      },
     };
   }
 
   return {
     sources: Array.from(collectedSources.values()).slice(0, 4),
     steps,
+    shouldAnswer: true,
+    debug: {
+      questionType: isOverviewQuestion(question) ? "overview" : "direct",
+      hitCount: collectedSources.size,
+      strongHitCount: collectedSources.size,
+      topScore: null,
+      topSourceFilename: Array.from(collectedSources.values())[0]?.filename ?? null,
+      refusalReason: null,
+    },
   };
 }
 
@@ -469,7 +693,8 @@ export async function runDocumentAgent(question: string): Promise<AgentExecution
   const plan = await executeAgentPlan(question);
   if (plan.sources.length === 0) {
     return {
-      answer: "没有在已导入文档里检索到足够相关的内容。请换个问法，或者先补充对应文档。",
+      answer:
+        "没有在已导入文档里检索到足够强的相关证据，暂时无法可靠回答。请换个更具体的问法，或补充对应文档后再试。",
       sources: [],
       steps: plan.steps,
     };

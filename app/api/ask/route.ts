@@ -19,6 +19,14 @@ type CachedAnswer = {
     score: number | null;
     excerpt: string;
   }>;
+  debug?: {
+    questionType: "overview" | "direct";
+    hitCount: number;
+    strongHitCount: number;
+    topScore: number | null;
+    topSourceFilename: string | null;
+    refusalReason: string | null;
+  };
   createdAt: number;
 };
 
@@ -93,6 +101,17 @@ export async function POST(request: NextRequest) {
               sources: cached.sources,
             });
             send({
+              type: "debug",
+              debug: cached.debug || {
+                questionType: "direct",
+                hitCount: cached.sources.length,
+                strongHitCount: cached.sources.length,
+                topScore: cached.sources[0]?.score ?? null,
+                topSourceFilename: cached.sources[0]?.filename ?? null,
+                refusalReason: null,
+              },
+            });
+            send({
               type: "answer",
               delta: cached.answer,
             });
@@ -111,12 +130,27 @@ export async function POST(request: NextRequest) {
             type: "sources",
             sources: plan.sources,
           });
+          send({
+            type: "debug",
+            debug: plan.debug,
+          });
 
           if (plan.sources.length === 0) {
             send({
               type: "answer",
               delta:
                 "没有在已导入文档里检索到足够相关的内容。请换个问法，或者先补充对应文档。",
+            });
+            send({ type: "done" });
+            controller.close();
+            return;
+          }
+
+          if (!plan.shouldAnswer) {
+            send({
+              type: "answer",
+              delta:
+                "检索到了部分相关内容，但证据强度还不够，暂时无法可靠回答。请换个更具体的问法，或补充对应文档后再试。",
             });
             send({ type: "done" });
             controller.close();
@@ -158,6 +192,7 @@ export async function POST(request: NextRequest) {
               answer: finalAnswer,
               steps: plan.steps,
               sources: plan.sources,
+              debug: plan.debug,
               createdAt: Date.now(),
             });
           }

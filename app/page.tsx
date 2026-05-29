@@ -46,6 +46,14 @@ type AskResponse = {
     score: number | null;
     excerpt: string;
   }>;
+  debug?: {
+    questionType: "overview" | "direct";
+    hitCount: number;
+    strongHitCount: number;
+    topScore: number | null;
+    topSourceFilename: string | null;
+    refusalReason: string | null;
+  };
 };
 
 type StreamEvent =
@@ -60,6 +68,10 @@ type StreamEvent =
   | {
       type: "answer";
       delta?: string;
+    }
+  | {
+      type: "debug";
+      debug?: AskResponse["debug"];
     }
   | {
       type: "error";
@@ -115,6 +127,22 @@ function getLocalProfileValidationError(profile: ModelProfile) {
   return null;
 }
 
+function formatRefusalReason(reason: string | null | undefined) {
+  if (!reason) {
+    return "允许回答";
+  }
+
+  if (reason === "no_hits") {
+    return "未检索到命中片段";
+  }
+
+  if (reason === "top_hit_below_threshold") {
+    return "命中片段存在，但最高分未达到回答阈值";
+  }
+
+  return reason;
+}
+
 export default function HomePage() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelWorkspaceConfig | null>(null);
@@ -134,6 +162,7 @@ export default function HomePage() {
   const [answer, setAnswer] = useState("");
   const [steps, setSteps] = useState<AskResponse["steps"]>([]);
   const [sources, setSources] = useState<AskResponse["sources"]>([]);
+  const [debugInfo, setDebugInfo] = useState<AskResponse["debug"] | null>(null);
   const [markdownContent, setMarkdownContent] = useState("");
   const [richTextContent, setRichTextContent] = useState("");
   const [savedRichTextContent, setSavedRichTextContent] = useState("");
@@ -789,6 +818,7 @@ export default function HomePage() {
       setAnswer("");
       setSteps([]);
       setSources([]);
+      setDebugInfo(null);
       setToast(null);
       setIsStreaming(true);
 
@@ -866,6 +896,11 @@ export default function HomePage() {
 
             if (event.type === "sources") {
               setSources(event.sources || []);
+              continue;
+            }
+
+            if (event.type === "debug") {
+              setDebugInfo(event.debug || null);
               continue;
             }
 
@@ -1284,6 +1319,20 @@ export default function HomePage() {
                     "答案会显示在这里。第一版重点是答复准确和带出处。"
                   )}
                 </div>
+                <div className="answer-debug-strip">
+                  <strong>检索调试</strong>
+                  {debugInfo ? (
+                    <span className="muted tiny">
+                      {`门禁：${formatRefusalReason(debugInfo.refusalReason)} | 总命中：${debugInfo.hitCount} | 强命中：${debugInfo.strongHitCount} | 最高分：${
+                        typeof debugInfo.topScore === "number"
+                          ? debugInfo.topScore.toFixed(2)
+                          : "n/a"
+                      }`}
+                    </span>
+                  ) : (
+                    <span className="muted tiny">等待调试结果</span>
+                  )}
+                </div>
               </div>
 
               <div className="panel md-editor-panel">
@@ -1387,6 +1436,57 @@ export default function HomePage() {
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div>
+                <div className="section-head">
+                  <h3>检索调试</h3>
+                  <span className="muted tiny">
+                    {debugInfo ? "已返回调试信息" : "等待调试结果"}
+                  </span>
+                </div>
+                <details className="debug-shell" open>
+                  <summary>查看这次问答为什么回答或拒答</summary>
+                  {debugInfo ? (
+                    <div className="debug-grid">
+                      <div className="debug-card">
+                        <span className="muted tiny">问题类型</span>
+                        <strong>{debugInfo.questionType === "overview" ? "统计/概括" : "直接问答"}</strong>
+                      </div>
+                      <div className="debug-card">
+                        <span className="muted tiny">总命中数</span>
+                        <strong>{debugInfo.hitCount}</strong>
+                      </div>
+                      <div className="debug-card">
+                        <span className="muted tiny">强命中数</span>
+                        <strong>{debugInfo.strongHitCount}</strong>
+                      </div>
+                      <div className="debug-card">
+                        <span className="muted tiny">最高分</span>
+                        <strong>
+                          {typeof debugInfo.topScore === "number"
+                            ? debugInfo.topScore.toFixed(2)
+                            : "n/a"}
+                        </strong>
+                      </div>
+                      <div className="debug-card">
+                        <span className="muted tiny">最高分来源</span>
+                        <strong>{debugInfo.topSourceFilename || "n/a"}</strong>
+                      </div>
+                      <div className="debug-card">
+                        <span className="muted tiny">门禁状态</span>
+                        <strong>{formatRefusalReason(debugInfo.refusalReason)}</strong>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="source-card">
+                      <strong>暂无调试信息</strong>
+                      <span className="muted tiny">
+                        发起提问后，这里会显示命中数量、最高分和拒答原因。
+                      </span>
+                    </div>
+                  )}
+                </details>
               </div>
 
               <div>

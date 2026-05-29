@@ -143,25 +143,75 @@ function docxXmlToMarkdown(documentXml: string, stylesXml: string) {
   return normalizeText(lines.join("\n\n"));
 }
 
-export function chunkText(text: string, chunkSize = 900, overlap = 180) {
+const DEFAULT_CHUNK_SIZE = 420;
+const DEFAULT_CHUNK_OVERLAP = 80;
+
+function splitIntoChunkUnits(text: string) {
+  const normalized = normalizeText(text);
+
+  return normalized
+    .split(/\n{2,}/)
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .flatMap((block) => {
+      if (block.length <= DEFAULT_CHUNK_SIZE) {
+        return [block];
+      }
+
+      const sentences = block
+        .split(/(?<=[。！？!?；;]|[.](?=\s)|\n)/)
+        .map((part) => part.trim())
+        .filter(Boolean);
+
+      return sentences.length ? sentences : [block];
+    });
+}
+
+export function chunkText(
+  text: string,
+  chunkSize = DEFAULT_CHUNK_SIZE,
+  overlap = DEFAULT_CHUNK_OVERLAP,
+) {
+  const units = splitIntoChunkUnits(text);
   const chunks: string[] = [];
-  let start = 0;
+  let current = "";
 
-  while (start < text.length) {
-    const end = Math.min(start + chunkSize, text.length);
-    const chunk = text.slice(start, end).trim();
-    if (chunk) {
-      chunks.push(chunk);
+  const pushChunk = (value: string) => {
+    const normalized = normalizeText(value);
+    if (normalized) {
+      chunks.push(normalized);
+    }
+  };
+
+  for (const unit of units) {
+    if (!current) {
+      current = unit;
+      continue;
     }
 
-    if (end >= text.length) {
-      break;
+    const candidate = `${current}\n\n${unit}`;
+    if (candidate.length <= chunkSize) {
+      current = candidate;
+      continue;
     }
 
-    start = Math.max(end - overlap, start + 1);
+    pushChunk(current);
+
+    const tail = overlap > 0 ? current.slice(-overlap).trim() : "";
+    current = tail ? `${tail}\n\n${unit}` : unit;
+
+    while (current.length > chunkSize) {
+      pushChunk(current.slice(0, chunkSize));
+      current =
+        overlap > 0
+          ? current.slice(Math.max(chunkSize - overlap, 1)).trim()
+          : current.slice(chunkSize).trim();
+    }
   }
 
-  return chunks;
+  pushChunk(current);
+
+  return chunks.filter((chunk, index) => chunks.indexOf(chunk) === index);
 }
 
 async function extractTextFromDocument(filePath: string) {

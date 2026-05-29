@@ -910,6 +910,19 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+.answer-debug-strip {
+  display: grid;
+  gap: 6px;
+  padding: 0 18px 18px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+}
+
+.answer-debug-strip strong {
+  padding-top: 14px;
+  color: var(--text);
+  font-size: 13px;
+}
+
 .stream-caret {
   display: inline-block;
   width: 10px;
@@ -965,6 +978,43 @@ textarea {
 .source-list {
   display: grid;
   gap: 10px;
+}
+
+.debug-shell {
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(8, 16, 28, 0.46);
+  padding: 12px 14px 14px;
+}
+
+.debug-shell summary {
+  cursor: pointer;
+  color: var(--text);
+  font-weight: 600;
+}
+
+.debug-shell[open] summary {
+  margin-bottom: 12px;
+}
+
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+
+.debug-card {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(151, 169, 198, 0.08);
+}
+
+.debug-card strong {
+  color: var(--text);
+  overflow-wrap: anywhere;
 }
 
 .source-card {

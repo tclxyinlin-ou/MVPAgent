@@ -1,5 +1,6 @@
 import { access, mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
+import { chunkText } from "@/lib/openai";
 
 export type IndexedDocument = {
   id: string;
@@ -43,25 +44,8 @@ function normalizeStoredText(text: string) {
     .trim();
 }
 
-function chunkStoredText(text: string, chunkSize = 900, overlap = 180) {
-  const chunks: string[] = [];
-  let start = 0;
-
-  while (start < text.length) {
-    const end = Math.min(start + chunkSize, text.length);
-    const chunk = text.slice(start, end).trim();
-    if (chunk) {
-      chunks.push(chunk);
-    }
-
-    if (end >= text.length) {
-      break;
-    }
-
-    start = Math.max(end - overlap, start + 1);
-  }
-
-  return chunks;
+function chunkStoredText(text: string) {
+  return chunkText(text);
 }
 
 async function ensureDataDir() {
