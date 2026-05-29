@@ -1,5 +1,9 @@
 import { readFile, unlink, writeFile } from "fs/promises";
 import { NextRequest, NextResponse } from "next/server";
+import {
+  deleteStructuredKnowledgeDocument,
+  saveStructuredKnowledgeDocument,
+} from "@/lib/knowledge-index";
 import { chunkTextWithHeadings, normalizeText } from "@/lib/openai";
 import { readState, writeState } from "@/lib/store";
 import { marked } from "marked";
@@ -95,6 +99,7 @@ export async function PUT(
     htmlContent || (await marked.parse(`${normalized}\n`)),
     "utf8",
   );
+  await saveStructuredKnowledgeDocument(target.document.id, normalized);
 
   const nextChunks = chunkTextWithHeadings(normalized);
   const nextChunkCount = nextChunks.length;
@@ -134,6 +139,7 @@ export async function DELETE(
     unlink(target.document.storedPath),
     unlink(target.document.markdownPath),
     unlink(target.document.richTextPath),
+    deleteStructuredKnowledgeDocument(target.document.id),
   ]);
 
   return NextResponse.json({

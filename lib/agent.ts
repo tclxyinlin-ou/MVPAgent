@@ -1,4 +1,10 @@
 import { getModelName, getOpenAIClient, readMarkdownChunks } from "@/lib/openai";
+import {
+  ensureStructuredKnowledgeDocument,
+  loadStructuredKnowledgeDocument,
+  type DomainEnvironmentMap,
+  type StructuredKnowledgeDocument,
+} from "@/lib/knowledge-index";
 import { readState, type IndexedDocument } from "@/lib/store";
 
 type SearchResult = {
@@ -22,11 +28,21 @@ type QuestionIntent = {
   wantsConcreteUrl: boolean;
 };
 
+type StructuredLookupResult = {
+  answer: string;
+  sources: SearchResult[];
+  debugLabel: string;
+};
+
+type StructuredEnvironmentKey = keyof DomainEnvironmentMap;
+
 type ExtractedAnswer = {
   value: string | null;
-  valueType: "full_url" | "domain_rule" | "text";
+  valueType: "full_url" | "domain_rule" | "domain_group" | "text";
   confidence: number;
   rationale: string;
+  groupName?: string | null;
+  domains?: Partial<Record<"qa" | "uat" | "pre" | "pre2" | "prod", string>>;
 };
 
 function extractUrls(text: string) {
@@ -80,6 +96,9 @@ export type AgentPlanResult = {
     questionType: "overview" | "direct";
     intentKind: QuestionIntent["kind"];
     answerMode: QuestionIntent["answerMode"];
+    queryRewrite: string | null;
+    lookupMode: "structured" | "text";
+    structuredHitKind: string | null;
     environment: string | null;
     targetField: string | null;
     hitCount: number;
@@ -106,6 +125,82 @@ function hasCjk(text: string) {
   return /[\u4e00-\u9fa5]/.test(text);
 }
 
+const QUERY_ALIAS_GROUPS: Array<{
+  triggers: RegExp[];
+  aliases: string[];
+}> = [
+  {
+    triggers: [/国际站/, /international/i],
+    aliases: [
+      "hopegoo",
+      "travelgo",
+      "微信国际站",
+      "国际m站",
+      "travelgom站",
+      "hopegoo-app",
+      "hopegoo-pc",
+      "hopegoo-m",
+    ],
+  },
+  {
+    triggers: [/港版支付宝/, /香港支付宝/, /alipayhk/i],
+    aliases: ["10219", "alipay", "travelgo", "港币", "香港钱包"],
+  },
+  {
+    triggers: [/微信国际站/, /wechat\s*hk/i, /\b982\b/],
+    aliases: ["wechatHK", "微信多语言", "982", "17u", "国际站"],
+  },
+  {
+    triggers: [/hopegoo\s*m/i, /hopegoo[-\s]?m/i],
+    aliases: ["hopegooTouch", "20003", "国际站", "hopegoo"],
+  },
+  {
+    triggers: [/travelgo\s*m站/i, /travelgom站/i, /国际m站/],
+    aliases: ["985", "touch", "travelgo", "国际站"],
+  },
+];
+
+const DOMAIN_GROUP_ALIASES: Array<{
+  groupName: string;
+  aliases: string[];
+}> = [
+  {
+    groupName: "Hopegoo",
+    aliases: [
+      "intlapp",
+      "hopegooapp",
+      "ja app",
+      "hopegootouch",
+      "hopegoo m",
+      "ja m",
+      "wechathk",
+      "微信多语言",
+      "octopus",
+      "八达通",
+      "alipaycn",
+      "hopegoojapanesetouch",
+      "hopegoojapaneseapp",
+      "hopegoounionpay",
+      "20000",
+      "20003",
+      "20004",
+      "20014",
+      "20017",
+      "20022",
+      "20023",
+      "20030",
+    ],
+  },
+  {
+    groupName: "Travelgo",
+    aliases: ["touch", "travelgom站", "travelgom", "国际m站", "alipay", "香港支付宝", "10219", "985"],
+  },
+  {
+    groupName: "17u",
+    aliases: ["weixin", "微信国际站", "982"],
+  },
+];
+
 function expandQueryTerms(question: string) {
   const baseTokens = dedupeTokens(tokenize(question)).filter((token) => token.length > 1 || hasCjk(token));
   const expanded = new Set(baseTokens);
@@ -129,6 +224,14 @@ function expandQueryTerms(question: string) {
     if (/h5|m站/i.test(token)) {
       expanded.add("移动");
       expanded.add("手机");
+    }
+  }
+
+  for (const group of QUERY_ALIAS_GROUPS) {
+    if (group.triggers.some((pattern) => pattern.test(question))) {
+      for (const alias of group.aliases) {
+        expanded.add(alias.toLowerCase());
+      }
     }
   }
 
@@ -342,6 +445,165 @@ function parseQuestionIntent(question: string): QuestionIntent {
   };
 }
 
+function rewriteQuestion(question: string) {
+  const compact = question.trim();
+  const normalized = compact
+    .replace(/港版支付宝/gi, "香港支付宝")
+    .replace(/微信多语言/gi, "wechatHK")
+    .replace(/hopegoo\s*m站/gi, "hopegooTouch")
+    .replace(/travelgo\s*m站/gi, "touch");
+
+  return {
+    original: compact,
+    normalized,
+    aliases: expandQueryTerms(normalized),
+  };
+}
+
+function normalizeEntityToken(value: string) {
+  return value.toLowerCase().replace(/[\s_-]+/g, "");
+}
+
+function getEntityAliases(entity: string | null, question: string) {
+  const seeds = [entity, question]
+    .filter(Boolean)
+    .map((item) => normalizeEntityToken(item as string));
+  const aliases = new Set<string>(seeds);
+
+  for (const group of DOMAIN_GROUP_ALIASES) {
+    if (group.aliases.some((alias) => seeds.some((seed) => seed.includes(normalizeEntityToken(alias))))) {
+      for (const alias of group.aliases) {
+        aliases.add(normalizeEntityToken(alias));
+      }
+      aliases.add(normalizeEntityToken(group.groupName));
+    }
+  }
+
+  return Array.from(aliases).filter(Boolean);
+}
+
+function parseDomainValue(raw: string) {
+  const linkMatch = raw.match(/\((https?:\/\/[^)\s]+)\)/i);
+  if (linkMatch?.[1]) {
+    return linkMatch[1];
+  }
+
+  const nakedUrlMatch = raw.match(/https?:\/\/[^\s)]+/i);
+  if (nakedUrlMatch?.[0]) {
+    return nakedUrlMatch[0];
+  }
+
+  const bareDomainMatch = raw.match(/www\d?\.[a-z0-9.-]+\.[a-z]{2,}/i);
+  if (bareDomainMatch?.[0]) {
+    return bareDomainMatch[0];
+  }
+
+  return null;
+}
+
+function parseDomainMappings(excerpt: string) {
+  const domains: Partial<Record<"qa" | "uat" | "pre" | "pre2" | "prod", string>> = {};
+  const lines = excerpt.split("\n").map((line) => line.trim()).filter(Boolean);
+
+  for (const line of lines) {
+    const qaMatch = line.match(/^qa[：:]\s*(.+)$/i);
+    if (qaMatch) {
+      const value = parseDomainValue(qaMatch[1]);
+      if (value) {
+        domains.qa = value;
+      }
+      continue;
+    }
+
+    const uatMatch = line.match(/^uat[：:]\s*(.+)$/i);
+    if (uatMatch) {
+      const value = parseDomainValue(uatMatch[1]);
+      if (value) {
+        domains.uat = value;
+      }
+      continue;
+    }
+
+    const pre2Match = line.match(/^(预发2|pre2)[：:]\s*(.+)$/i);
+    if (pre2Match) {
+      const value = parseDomainValue(pre2Match[2]);
+      if (value) {
+        domains.pre2 = value;
+      }
+      continue;
+    }
+
+    const preMatch = line.match(/^(预发|stage)[：:]\s*(.+)$/i);
+    if (preMatch) {
+      const value = parseDomainValue(preMatch[2]);
+      if (value) {
+        domains.pre = value;
+      }
+      continue;
+    }
+
+    const prodMatch = line.match(/^(生产|正式|prod|production)[：:]\s*(.+)$/i);
+    if (prodMatch) {
+      const value = parseDomainValue(prodMatch[2]);
+      if (value) {
+        domains.prod = value;
+      }
+    }
+  }
+
+  return domains;
+}
+
+function extractDomainGroupAnswer(intent: QuestionIntent, sources: SearchResult[], question: string): ExtractedAnswer | null {
+  const aliases = getEntityAliases(intent.entity, question);
+  if (!aliases.length) {
+    return null;
+  }
+
+  for (const source of sources) {
+    const excerpt = source.excerpt;
+    const normalizedExcerpt = normalizeEntityToken(excerpt);
+
+    for (const group of DOMAIN_GROUP_ALIASES) {
+      const normalizedGroupAliases = group.aliases.map((alias) => normalizeEntityToken(alias));
+      const matchesAlias = normalizedGroupAliases.some(
+        (alias) =>
+          aliases.includes(alias) ||
+          normalizedExcerpt.includes(`渠道：${alias}`) ||
+          normalizedExcerpt.includes(alias),
+      );
+
+      if (!matchesAlias) {
+        continue;
+      }
+
+      const domains = parseDomainMappings(excerpt);
+      if (!Object.keys(domains).length) {
+        continue;
+      }
+
+      const preferredValue =
+        (intent.environment && domains[intent.environment as keyof typeof domains]) ||
+        domains.uat ||
+        domains.qa ||
+        domains.prod ||
+        Object.values(domains)[0] ||
+        null;
+
+      return {
+        value: preferredValue,
+        valueType: "domain_group",
+        confidence: 0.86,
+        rationale: "命中片段展示了渠道所属的域名组，以及该组的环境域名映射。",
+        groupName: group.groupName,
+        domains,
+      };
+    }
+  }
+
+  return null;
+}
+
 async function buildDocumentOverviewSources(documents: IndexedDocument[], limit = 8) {
   const results: SearchResult[] = [];
 
@@ -400,6 +662,7 @@ function rerankResultsForQuestion(intent: QuestionIntent, results: RankedSearchR
 function scoreResultForIntent(intent: QuestionIntent, result: RankedSearchResult) {
   let total = result.score;
   const excerpt = result.excerpt.toLowerCase();
+  const headingText = result.headingPath.join(" > ").toLowerCase();
 
   if (intent.entity && excerpt.includes(intent.entity.toLowerCase())) {
     total += 1.4;
@@ -433,6 +696,22 @@ function scoreResultForIntent(intent: QuestionIntent, result: RankedSearchResult
     if (/https?:\/\/.+#\/index/.test(excerpt)) {
       total -= 0.8;
     }
+  }
+
+  if (headingText.includes("国际站")) {
+    total += 1.8;
+  }
+
+  if (headingText.includes("渠道")) {
+    total += 0.8;
+  }
+
+  if (headingText.includes("环境域名")) {
+    total += intent.wantsConcreteUrl || intent.answerMode === "rule" ? 1.1 : 0.4;
+  }
+
+  if (intent.entity && headingText.includes(intent.entity.toLowerCase())) {
+    total += 1;
   }
 
   return total;
@@ -487,6 +766,152 @@ function extractAnswerFromSources(intent: QuestionIntent, sources: SearchResult[
           valueType: "domain_rule",
           confidence: 0.58,
           rationale: "只抽取到了环境域名规则，没有抽取到完整路径。",
+        };
+      }
+    }
+  }
+
+  if (intent.entity && (intent.answerMode === "rule" || intent.targetField === "rule")) {
+    const groupAnswer = extractDomainGroupAnswer(intent, sources, intent.entity);
+    if (groupAnswer) {
+      return groupAnswer;
+    }
+  }
+
+  return null;
+}
+
+function formatDomainGroupAnswer(extracted: ExtractedAnswer) {
+  const parts: string[] = [];
+  if (extracted.domains?.qa) {
+    parts.push(`QA：${extracted.domains.qa}`);
+  }
+  if (extracted.domains?.uat) {
+    parts.push(`UAT：${extracted.domains.uat}`);
+  }
+  if (extracted.domains?.pre) {
+    parts.push(`预发：${extracted.domains.pre}`);
+  }
+  if (extracted.domains?.pre2) {
+    parts.push(`预发2：${extracted.domains.pre2}`);
+  }
+  if (extracted.domains?.prod) {
+    parts.push(`生产：${extracted.domains.prod}`);
+  }
+
+  return `结论：该渠道归属 ${extracted.groupName || "对应"} 域名组，共用这组环境域名。\n${parts.join("\n")}\n依据：命中片段先列出渠道归属，再给出了该域名组的 QA/UAT/预发/生产映射。`;
+}
+
+function buildStructuredSources(
+  document: StructuredKnowledgeDocument,
+  groupName: string,
+  environments: Record<string, string>,
+) {
+  const excerpt = [
+    `域名组：${groupName}`,
+    ...Object.entries(environments).map(([key, value]) => `${key.toUpperCase()}：${value}`),
+  ].join("\n");
+
+  return [
+    {
+      filename: `${document.documentId}.entities`,
+      score: 5,
+      excerpt,
+    } satisfies SearchResult,
+  ];
+}
+
+function buildStructuredAnswerSource(documentId: string, answer: string) {
+  return {
+    filename: `${documentId}.structured-answer`,
+    score: 9,
+    excerpt: answer,
+  } satisfies SearchResult;
+}
+
+async function lookupStructuredKnowledge(
+  question: string,
+  documents: IndexedDocument[],
+): Promise<StructuredLookupResult | null> {
+  const rewritten = rewriteQuestion(question);
+  const intent = parseQuestionIntent(rewritten.normalized);
+  const tokens = rewritten.aliases.map((token) => normalizeEntityToken(token));
+
+    for (const document of documents) {
+    const knowledge =
+      (await loadStructuredKnowledgeDocument(document.id)) ||
+      (await ensureStructuredKnowledgeDocument(document.id, document.markdownPath));
+    if (!knowledge) {
+      continue;
+    }
+
+    for (const group of knowledge.domainGroups) {
+      const matchedChannels = group.channels.filter((channel) =>
+        channel.aliases.some((alias) => tokens.includes(normalizeEntityToken(alias))) ||
+        (channel.id ? tokens.includes(normalizeEntityToken(channel.id)) : false),
+      );
+
+      if (!matchedChannels.length) {
+        continue;
+      }
+
+      const selectedEnvironmentKey = intent.environment as StructuredEnvironmentKey | null;
+      const selectedEnvironment =
+        (selectedEnvironmentKey && group.environments[selectedEnvironmentKey]) || null;
+      const sources = buildStructuredSources(knowledge, group.name, group.environments);
+
+      if (intent.wantsConcreteUrl) {
+        const matchedExamples = knowledge.urlExamples.filter(
+          (example) =>
+            matchedChannels.some((channel) => channel.key === example.channelKey) &&
+            (!intent.environment || example.environment === intent.environment) &&
+            (!intent.targetField ||
+              (intent.targetField === "homepage" && example.pageType === "homepage") ||
+              (intent.targetField === "order_detail" && example.pageType === "order_detail") ||
+              (intent.targetField === "grab_order" && example.pageType === "grab_order")),
+        );
+
+        if (matchedExamples.length) {
+          const best = matchedExamples[0];
+          const answer = `结论：${best.url}\n依据：结构化索引里命中了渠道 ${matchedChannels[0].aliases[0]} 的 ${best.environment || "对应"} 环境 ${best.pageType} 示例链接。`;
+          return {
+            answer,
+            sources: [
+              buildStructuredAnswerSource(knowledge.documentId, answer),
+              ...sources,
+              {
+                filename: `${knowledge.documentId}.entities`,
+                score: 6,
+                excerpt: `渠道：${best.channelKey}\n环境：${best.environment}\n页面：${best.pageType}\nURL：${best.url}`,
+              },
+            ],
+            debugLabel: "structured_url_example",
+          };
+        }
+      }
+
+      if (intent.answerMode === "rule" || intent.targetField === "rule") {
+        const lines = [
+          `结论：该渠道归属 ${group.name} 域名组，共用这组环境域名。`,
+          group.environments.qa ? `QA：${group.environments.qa}` : "",
+          group.environments.uat ? `UAT：${group.environments.uat}` : "",
+          group.environments.pre ? `预发：${group.environments.pre}` : "",
+          group.environments.pre2 ? `预发2：${group.environments.pre2}` : "",
+          group.environments.prod ? `生产：${group.environments.prod}` : "",
+          selectedEnvironment
+            ? `补充：你问题里指定的 ${intent.environment?.toUpperCase()} 环境域名是 ${selectedEnvironment}。`
+            : "",
+          "依据：结构化索引已建立渠道与域名组的映射关系。",
+        ].filter(Boolean);
+        const answer = lines.join("\n");
+
+        return {
+          answer,
+          sources: [
+            buildStructuredAnswerSource(knowledge.documentId, answer),
+            ...sources,
+          ],
+          debugLabel: "structured_domain_group",
         };
       }
     }
@@ -578,11 +1003,41 @@ export async function executeFastDocumentPlan(
     throw new Error("当前选中的文档不存在，请重新选择。");
   }
 
-  const intent = parseQuestionIntent(question);
+  const rewritten = rewriteQuestion(question);
+  const intent = parseQuestionIntent(rewritten.normalized);
+  const structured = await lookupStructuredKnowledge(rewritten.normalized, scopedDocuments);
+
+  if (structured) {
+    return {
+      sources: structured.sources,
+      steps: [
+        {
+          tool: "lookup_channel",
+          summary: `先走结构化查询，命中 ${structured.debugLabel}`,
+        },
+      ],
+      shouldAnswer: true,
+      debug: {
+        questionType: intent.kind === "overview" ? "overview" : "direct",
+        intentKind: intent.kind,
+        answerMode: intent.answerMode,
+        queryRewrite: rewritten.normalized !== question.trim() ? rewritten.normalized : null,
+        lookupMode: "structured",
+        structuredHitKind: structured.debugLabel,
+        environment: intent.environment,
+        targetField: intent.targetField,
+        hitCount: structured.sources.length,
+        strongHitCount: structured.sources.length,
+        topScore: structured.sources[0]?.score ?? null,
+        topSourceFilename: structured.sources[0]?.filename ?? null,
+        refusalReason: null,
+      },
+    };
+  }
 
   const rankedResults = rerankResultsForQuestion(
     intent,
-    await rankDocumentsInScope(scopedDocuments, question),
+    await rankDocumentsInScope(scopedDocuments, rewritten.normalized),
   );
   const strongResults = rankedResults.filter((result) => isStrongEvidence(result));
   let sources = (strongResults.length ? strongResults : rankedResults)
@@ -633,6 +1088,9 @@ export async function executeFastDocumentPlan(
       questionType: intent.kind === "overview" ? "overview" : "direct",
       intentKind: intent.kind,
       answerMode: intent.answerMode,
+      queryRewrite: rewritten.normalized !== question.trim() ? rewritten.normalized : null,
+      lookupMode: "text",
+      structuredHitKind: null,
       environment: intent.environment,
       targetField: intent.targetField,
       hitCount: rankedResults.length,
@@ -790,6 +1248,9 @@ function buildFallbackDebug(question: string, hitCount: number, topSourceFilenam
     questionType: intent.kind === "overview" ? "overview" : "direct",
     intentKind: intent.kind,
     answerMode: intent.answerMode,
+    queryRewrite: null,
+    lookupMode: "text",
+    structuredHitKind: null,
     environment: intent.environment,
     targetField: intent.targetField,
     hitCount,
@@ -944,6 +1405,14 @@ export async function streamFinalAnswer(
   sources: SearchResult[],
   onDelta: (chunk: string) => void,
 ) {
+  const structuredAnswerSource = sources.find((source) =>
+    source.filename.endsWith(".structured-answer"),
+  );
+  if (structuredAnswerSource?.excerpt) {
+    onDelta(structuredAnswerSource.excerpt);
+    return structuredAnswerSource.excerpt;
+  }
+
   const intent = parseQuestionIntent(question);
   const extracted = extractAnswerFromSources(intent, sources);
 
@@ -955,6 +1424,12 @@ export async function streamFinalAnswer(
 
   if (intent.wantsConcreteUrl && extracted?.valueType === "domain_rule" && extracted.value) {
     const answer = `结论：文档里当前只明确给出了域名规则 ${extracted.value}，没有足够证据确认完整首页路径。\n依据：命中片段展示的是环境域名映射，而不是完整 URL。`;
+    onDelta(answer);
+    return answer;
+  }
+
+  if (extracted?.valueType === "domain_group") {
+    const answer = formatDomainGroupAnswer(extracted);
     onDelta(answer);
     return answer;
   }
@@ -984,6 +1459,13 @@ export async function streamFinalAnswer(
 }
 
 export async function generateFinalAnswer(question: string, sources: SearchResult[]) {
+  const structuredAnswerSource = sources.find((source) =>
+    source.filename.endsWith(".structured-answer"),
+  );
+  if (structuredAnswerSource?.excerpt) {
+    return structuredAnswerSource.excerpt;
+  }
+
   const intent = parseQuestionIntent(question);
   const extracted = extractAnswerFromSources(intent, sources);
 
@@ -993,6 +1475,10 @@ export async function generateFinalAnswer(question: string, sources: SearchResul
 
   if (intent.wantsConcreteUrl && extracted?.valueType === "domain_rule" && extracted.value) {
     return `结论：文档里当前只明确给出了域名规则 ${extracted.value}，没有足够证据确认完整首页路径。\n依据：命中片段展示的是环境域名映射，而不是完整 URL。`;
+  }
+
+  if (extracted?.valueType === "domain_group") {
+    return formatDomainGroupAnswer(extracted);
   }
 
   const finalAnswer = await callModel([

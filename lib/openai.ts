@@ -11,6 +11,7 @@ import {
   UPLOAD_DIR,
   writeState,
 } from "@/lib/store";
+import { saveStructuredKnowledgeDocument } from "@/lib/knowledge-index";
 import { getActiveModelProfileSync } from "@/lib/model-config";
 import { marked } from "marked";
 
@@ -115,14 +116,69 @@ function extractDocxParagraphText(paragraphXml: string) {
   return normalizeText(parts.join(""));
 }
 
+function extractDocxCellText(cellXml: string) {
+  const paragraphs = cellXml.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) || [];
+  const parts = paragraphs
+    .map((paragraphXml) => extractDocxParagraphText(paragraphXml))
+    .filter(Boolean);
+
+  return normalizeText(parts.join("\n"));
+}
+
+function tableRowsToMarkdown(rows: string[][]) {
+  const normalizedRows = rows
+    .map((row) => row.map((cell) => cell.replace(/\|/g, "\\|").trim()))
+    .filter((row) => row.some((cell) => cell));
+
+  if (!normalizedRows.length) {
+    return [];
+  }
+
+  const maxColumns = Math.max(...normalizedRows.map((row) => row.length));
+  const alignedRows = normalizedRows.map((row) => {
+    const nextRow = [...row];
+    while (nextRow.length < maxColumns) {
+      nextRow.push("");
+    }
+    return nextRow;
+  });
+
+  const [headerRow, ...bodyRows] = alignedRows;
+  const dividerRow = new Array(maxColumns).fill("---");
+
+  return [
+    `| ${headerRow.join(" | ")} |`,
+    `| ${dividerRow.join(" | ")} |`,
+    ...bodyRows.map((row) => `| ${row.join(" | ")} |`),
+  ];
+}
+
 function docxXmlToMarkdown(documentXml: string, stylesXml: string) {
   const headingStyles = parseDocxHeadingStyles(stylesXml);
   const lines: string[] = [];
-  const paragraphRegex = /<w:p\b[^>]*>([\s\S]*?)<\/w:p>/g;
+  const blockRegex = /<w:(p|tbl)\b[^>]*>[\s\S]*?<\/w:\1>/g;
   let match: RegExpExecArray | null;
 
-  while ((match = paragraphRegex.exec(documentXml))) {
-    const paragraphXml = match[1];
+  while ((match = blockRegex.exec(documentXml))) {
+    const blockXml = match[0];
+
+    if (match[1] === "tbl") {
+      const rowXmlList = blockXml.match(/<w:tr\b[^>]*>[\s\S]*?<\/w:tr>/g) || [];
+      const rows = rowXmlList
+        .map((rowXml) => {
+          const cellXmlList = rowXml.match(/<w:tc\b[^>]*>[\s\S]*?<\/w:tc>/g) || [];
+          return cellXmlList.map((cellXml) => extractDocxCellText(cellXml));
+        })
+        .filter((row) => row.some((cell) => cell));
+
+      const tableLines = tableRowsToMarkdown(rows);
+      if (tableLines.length) {
+        lines.push(tableLines.join("\n"));
+      }
+      continue;
+    }
+
+    const paragraphXml = blockXml;
     const text = extractDocxParagraphText(paragraphXml);
 
     if (!text) {
@@ -415,6 +471,7 @@ export async function indexDocumentLocally({
   const markdownContent = toMarkdownDocument(filename, extractedText);
   await writeFile(markdownPath, markdownContent, "utf8");
   await writeFile(richTextPath, await marked.parse(markdownContent), "utf8");
+  await saveStructuredKnowledgeDocument(`${timestamp}:${safeFilename}`, markdownContent);
   const chunks = chunkTextWithHeadings(normalizeText(markdownContent));
 
   const nextDocument: IndexedDocument = {

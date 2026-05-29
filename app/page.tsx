@@ -20,6 +20,12 @@ type StatusResponse = {
   documents: (IndexedDocument & { chunkCount?: number })[];
 };
 
+type CacheStatusResponse = {
+  ok: boolean;
+  askCacheSize: number;
+  clearedCount?: number;
+};
+
 type ModelProfile = {
   id: string;
   name: string;
@@ -50,6 +56,9 @@ type AskResponse = {
     questionType: "overview" | "direct";
     intentKind: "overview" | "exact_value" | "rule";
     answerMode: "summary" | "exact_value" | "rule";
+    queryRewrite: string | null;
+    lookupMode: "structured" | "text";
+    structuredHitKind: string | null;
     environment: string | null;
     targetField: string | null;
     hitCount: number;
@@ -175,6 +184,31 @@ function formatAnswerMode(mode: string | null | undefined) {
   return "未知";
 }
 
+function formatLookupMode(mode: "structured" | "text" | null | undefined) {
+  if (mode === "structured") {
+    return "结构化查询";
+  }
+  if (mode === "text") {
+    return "文本检索";
+  }
+
+  return "未知";
+}
+
+function formatStructuredHitKind(kind: string | null | undefined) {
+  if (!kind) {
+    return "未命中";
+  }
+  if (kind === "structured_domain_group") {
+    return "域名组命中";
+  }
+  if (kind === "structured_url_example") {
+    return "示例链接命中";
+  }
+
+  return kind;
+}
+
 export default function HomePage() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [modelConfig, setModelConfig] = useState<ModelWorkspaceConfig | null>(null);
@@ -204,6 +238,8 @@ export default function HomePage() {
   const [isSavingMarkdown, setIsSavingMarkdown] = useState(false);
   const [notice, setNotice] = useState("先导入文档，再开始问答。");
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isClearingCache, setIsClearingCache] = useState(false);
+  const [askCacheSize, setAskCacheSize] = useState(0);
   const [toast, setToast] = useState<{
     kind: "error" | "success";
     message: string;
@@ -276,9 +312,56 @@ export default function HomePage() {
     });
   }
 
+  async function loadCacheStatus() {
+    const res = await fetch("/api/cache");
+    const data = (await res.json()) as CacheStatusResponse;
+
+    if (!res.ok || !data.ok) {
+      throw new Error("读取缓存状态失败。");
+    }
+
+    setAskCacheSize(data.askCacheSize || 0);
+  }
+
   useEffect(() => {
     void loadStatus();
   }, []);
+
+  useEffect(() => {
+    void loadCacheStatus().catch((error) => {
+      const message = error instanceof Error ? error.message : "读取缓存状态失败。";
+      showToast("error", message);
+    });
+  }, []);
+
+  async function clearCache() {
+    if (isClearingCache || isPending || isStreaming) {
+      return;
+    }
+
+    setIsClearingCache(true);
+
+    try {
+      const res = await fetch("/api/cache", {
+        method: "DELETE",
+      });
+      const data = (await res.json()) as CacheStatusResponse;
+
+      if (!res.ok || !data.ok) {
+        throw new Error("清除缓存失败。");
+      }
+
+      setAskCacheSize(0);
+      setNotice(`缓存已清除，本次共清掉 ${data.clearedCount || 0} 条问答缓存。`);
+      showToast("success", "问答缓存已清除。");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "清除缓存失败。";
+      setNotice(message);
+      showToast("error", message);
+    } finally {
+      setIsClearingCache(false);
+    }
+  }
 
   async function loadModelConfig() {
     const res = await fetch("/api/model-config");
@@ -1075,6 +1158,14 @@ export default function HomePage() {
                   }
                 />
               </label>
+              <button
+                className="button button-secondary"
+                type="button"
+                disabled={isClearingCache || isPending || isStreaming}
+                onClick={() => void clearCache()}
+              >
+                {isClearingCache ? "清除中..." : `清除缓存（${askCacheSize}）`}
+              </button>
             </div>
 
             <div className="status">{notice}</div>
@@ -1494,12 +1585,24 @@ export default function HomePage() {
                         <strong>{debugInfo.questionType === "overview" ? "统计/概括" : "直接问答"}</strong>
                       </div>
                       <div className="debug-card">
+                        <span className="muted tiny">查询模式</span>
+                        <strong>{formatLookupMode(debugInfo.lookupMode)}</strong>
+                      </div>
+                      <div className="debug-card">
+                        <span className="muted tiny">结构化命中</span>
+                        <strong>{formatStructuredHitKind(debugInfo.structuredHitKind)}</strong>
+                      </div>
+                      <div className="debug-card">
                         <span className="muted tiny">环境</span>
                         <strong>{debugInfo.environment || "未识别"}</strong>
                       </div>
                       <div className="debug-card">
                         <span className="muted tiny">目标字段</span>
                         <strong>{debugInfo.targetField || "未识别"}</strong>
+                      </div>
+                      <div className="debug-card">
+                        <span className="muted tiny">改写后查询</span>
+                        <strong>{debugInfo.queryRewrite || "未改写"}</strong>
                       </div>
                       <div className="debug-card">
                         <span className="muted tiny">总命中数</span>

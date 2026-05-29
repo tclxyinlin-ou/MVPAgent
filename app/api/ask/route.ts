@@ -4,34 +4,10 @@ import {
   generateFinalAnswer,
   streamFinalAnswer,
 } from "@/lib/agent";
+import { writeAskCache } from "@/lib/ask-cache";
 import { readState } from "@/lib/store";
 
 export const runtime = "nodejs";
-
-type CachedAnswer = {
-  answer: string;
-  steps: Array<{
-    tool: string;
-    summary: string;
-  }>;
-  sources: Array<{
-    filename: string;
-    score: number | null;
-    excerpt: string;
-  }>;
-  debug?: {
-    questionType: "overview" | "direct";
-    hitCount: number;
-    strongHitCount: number;
-    topScore: number | null;
-    topSourceFilename: string | null;
-    refusalReason: string | null;
-  };
-  createdAt: number;
-};
-
-const ASK_CACHE = new Map<string, CachedAnswer>();
-const ASK_CACHE_LIMIT = 80;
 
 async function getCacheKey(question: string, documentId?: string) {
   const state = await readState();
@@ -44,17 +20,6 @@ async function getCacheKey(question: string, documentId?: string) {
       );
 
   return `${documentVersions.join("|")}::${question.trim().toLowerCase()}`;
-}
-
-function writeAskCache(key: string, value: CachedAnswer) {
-  if (ASK_CACHE.size >= ASK_CACHE_LIMIT) {
-    const oldestKey = ASK_CACHE.keys().next().value as string | undefined;
-    if (oldestKey) {
-      ASK_CACHE.delete(oldestKey);
-    }
-  }
-
-  ASK_CACHE.set(key, value);
 }
 
 export async function POST(request: NextRequest) {
@@ -83,46 +48,6 @@ export async function POST(request: NextRequest) {
 
         try {
           const cacheKey = await getCacheKey(question, documentId);
-          const cached = ASK_CACHE.get(cacheKey);
-
-          if (cached) {
-            send({
-              type: "steps",
-              steps: [
-                ...cached.steps,
-                {
-                  tool: "cache",
-                  summary: "命中最近问答缓存，直接返回结果",
-                },
-              ],
-            });
-            send({
-              type: "sources",
-              sources: cached.sources,
-            });
-            send({
-              type: "debug",
-              debug: cached.debug || {
-                questionType: "direct",
-                intentKind: "exact_value",
-                answerMode: "exact_value",
-                environment: null,
-                targetField: null,
-                hitCount: cached.sources.length,
-                strongHitCount: cached.sources.length,
-                topScore: cached.sources[0]?.score ?? null,
-                topSourceFilename: cached.sources[0]?.filename ?? null,
-                refusalReason: null,
-              },
-            });
-            send({
-              type: "answer",
-              delta: cached.answer,
-            });
-            send({ type: "done" });
-            controller.close();
-            return;
-          }
 
           const plan = await executeFastDocumentPlan(question, documentId);
 
@@ -192,7 +117,7 @@ export async function POST(request: NextRequest) {
           }
 
           if (finalAnswer) {
-            writeAskCache(cacheKey, {
+            await writeAskCache(cacheKey, {
               answer: finalAnswer,
               steps: plan.steps,
               sources: plan.sources,
