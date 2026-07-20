@@ -6,7 +6,17 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "prepare": "husky"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx,vue}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{css,scss,less,json,md}": [
+      "prettier --write"
+    ]
   },
   "dependencies": {
     "@tiptap/extension-color": "^3.22.5",
@@ -36,6 +46,10 @@
     "@types/node": "^22.15.17",
     "@types/react": "^19.0.12",
     "@types/react-dom": "^19.0.8",
+    "eslint": "^10.7.0",
+    "husky": "^9.1.7",
+    "lint-staged": "^17.1.0",
+    "prettier": "^3.9.5",
     "typescript": "^5.8.3"
   }
 }
