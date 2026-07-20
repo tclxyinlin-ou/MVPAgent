@@ -1,0 +1,18 @@
+package.json
+  h_a9b81e2ef51d83 9-10,12-19,49-52
+.npmrc
+  h_a9b81e2ef51d83 1-2
+.husky/pre-commit
+  h_a9b81e2ef51d83 1-4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "2829f4fa058ccba461a5e363df11618bf39ace21",
+  "prompts": {},
+  "humans": {
+    "h_a9b81e2ef51d83": {
+      "author": "ouyinlin <suyu15008507430@163.com>"
+    }
+  }
+}
